@@ -4273,8 +4273,12 @@ impl DriveIndex {
             ObjectType::Notebook => SharedObjectLimitBannerKind::Notebook,
             ObjectType::Workflow => SharedObjectLimitBannerKind::Workflow,
             // No other object type renders this banner (see the visibility gate
-            // in `render`); fall back to the workflow variant defensively.
-            _ => SharedObjectLimitBannerKind::Workflow,
+            // in `render`); fall back to the workflow variant defensively. Matched
+            // explicitly so a future `ObjectType` addition surfaces here at compile
+            // time instead of being silently treated as a workflow banner.
+            ObjectType::Folder | ObjectType::GenericStringObject(_) => {
+                SharedObjectLimitBannerKind::Workflow
+            }
         };
 
         let close_button = Hoverable::new(
