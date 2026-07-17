@@ -37,7 +37,8 @@ pub fn initialize_settings_for_tests_with_mode(
         CloudPreferencesSettings, CodeSettings, DebugSettings, EmacsBindingsSettings, FontSettings,
         GPUSettings, InputModeSettings, InputSettings, LocalControlSettings,
         NativePreferenceSettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings,
-        SelectionSettings, SshSettings, ThemeSettings, VimBannerSettings,
+        SelectionSettings, SharedObjectLimitBannerSettings, SshSettings, ThemeSettings,
+        VimBannerSettings,
     };
     use crate::terminal::general_settings::GeneralSettings;
     use crate::terminal::keys_settings::KeysSettings;
@@ -114,6 +115,7 @@ pub fn initialize_settings_for_tests_with_mode(
     ThemeSettings::register(app);
     UndoCloseSettings::register(app);
     VimBannerSettings::register(app);
+    SharedObjectLimitBannerSettings::register(app);
     WarpDriveSettings::register(app);
     WindowSettings::register(app);
     SharedSessionSettings::register(app);
