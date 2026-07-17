@@ -913,6 +913,7 @@ impl TuiTerminalSessionView {
             if matches!(
                 event,
                 AISettingsChangedEvent::TuiAgentModel { .. }
+                    | AISettingsChangedEvent::TuiExecutionProfile { .. }
                     | AISettingsChangedEvent::TuiUsageDisplayMode { .. }
             ) {
                 ctx.notify();
