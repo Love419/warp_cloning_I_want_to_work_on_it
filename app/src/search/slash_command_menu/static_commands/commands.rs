@@ -45,6 +45,14 @@ pub const MCP: StaticCommand = StaticCommand {
     auto_enter_ai_mode: false,
     argument: None,
 };
+pub const VIEW_LOGS: StaticCommand = StaticCommand {
+    name: "/view-logs",
+    description: "Bundle your TUI logs into a zip archive",
+    icon_path: "bundled/svg/download-01.svg",
+    availability: Availability::ALWAYS,
+    auto_enter_ai_mode: false,
+    argument: None,
+};
 
 pub static CREATE_ENVIRONMENT: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     name: "/create-environment",
@@ -623,6 +631,10 @@ impl Registry {
 }
 
 fn all_commands() -> Vec<StaticCommand> {
+    all_commands_for_mode(settings::settings_mode())
+}
+
+fn all_commands_for_mode(settings_mode: settings::SettingsMode) -> Vec<StaticCommand> {
     let mut commands = vec![
         ADD_MCP,
         ADD_PROMPT.clone(),
@@ -649,8 +661,8 @@ fn all_commands() -> Vec<StaticCommand> {
     if FeatureFlag::LocalDockerSandbox.is_enabled() {
         commands.push(CREATE_DOCKER_SANDBOX);
     }
-    if settings::settings_mode() == settings::SettingsMode::Tui {
-        commands.push(MCP);
+    if settings_mode == settings::SettingsMode::Tui {
+        commands.extend([MCP, VIEW_LOGS]);
     }
 
     if FeatureFlag::CreatingSharedSessions.is_enabled()
