@@ -3519,6 +3519,9 @@ impl ansi::Handler for TerminalModel {
                     }
                     KittyAction::DisplayStoredImage(_) => {}
                     KittyAction::QuerySupport(_) => {}
+                    KittyAction::AnimationFrame(_) => {}
+                    KittyAction::AnimationControl(_) => {}
+                    KittyAction::FrameComposition(_) => {}
                     KittyAction::Delete {
                         delete_placements_only,
                         deletion_type,
