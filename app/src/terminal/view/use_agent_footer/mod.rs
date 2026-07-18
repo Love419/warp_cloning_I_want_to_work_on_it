@@ -87,15 +87,9 @@ const CLI_AGENT_IMAGE_PASTE_DELAY: Duration = Duration::from_millis(300);
 const CLI_AGENT_MODE_SWITCH_PREFIXES: &[u8] = &[b'!', b'&'];
 
 /// Bytes that simulate a "paste image from clipboard" keystroke for the
-/// foreground CLI agent. `0x16` is `Ctrl+V` (SYN); on Windows Claude Code
-/// listens for `Alt+V` (`ESC` + `'v'`) instead. Mirrored from the equivalent
-/// branch in `TerminalView::paste`.
-fn cli_agent_paste_keystroke_bytes() -> Vec<u8> {
-    if cfg!(windows) {
-        vec![0x1b, b'v']
-    } else {
-        vec![0x16]
-    }
+/// foreground CLI agent. Mirrored from `TerminalView::paste`.
+fn cli_agent_paste_keystroke_bytes(agent: CLIAgent) -> Vec<u8> {
+    agent.image_paste_keystroke_bytes()
 }
 
 /// How rich input delivers text + Enter to the CLI agent's PTY.
@@ -805,6 +799,13 @@ impl TerminalView {
                             if !me.has_active_cli_agent_input_session(ctx) {
                                 return false;
                             }
+                            let Some(session) =
+                                CLIAgentSessionsModel::as_ref(ctx).session(me.view_id)
+                            else {
+                                return false;
+                            };
+                            let paste_keystroke = cli_agent_paste_keystroke_bytes(session.agent);
+
                             ctx.clipboard().write(ClipboardContent {
                                 images: Some(vec![ImageData {
                                     data: raw_bytes,
@@ -813,7 +814,7 @@ impl TerminalView {
                                 }]),
                                 ..Default::default()
                             });
-                            me.write_user_bytes_to_pty(cli_agent_paste_keystroke_bytes(), ctx);
+                            me.write_user_bytes_to_pty(paste_keystroke, ctx);
                             true
                         })
                         .await;
@@ -921,6 +922,13 @@ impl TerminalView {
                             if !still_long_running {
                                 return false;
                             }
+                            let Some(session) =
+                                CLIAgentSessionsModel::as_ref(ctx).session(me.view_id)
+                            else {
+                                return false;
+                            };
+                            let paste_keystroke = cli_agent_paste_keystroke_bytes(session.agent);
+
                             ctx.clipboard().write(ClipboardContent {
                                 images: Some(vec![ImageData {
                                     data: bytes,
@@ -929,7 +937,7 @@ impl TerminalView {
                                 }]),
                                 ..Default::default()
                             });
-                            me.write_user_bytes_to_pty(cli_agent_paste_keystroke_bytes(), ctx);
+                            me.write_user_bytes_to_pty(paste_keystroke, ctx);
                             true
                         })
                         .await;
