@@ -1497,9 +1497,7 @@ fn render_search_codebase(
         Some(status) => match status {
             AIActionStatus::Preprocessing | AIActionStatus::Queued => {
                 match props.search_codebase_view.get(id) {
-                    Some(search_codebase_view) if FeatureFlag::SearchCodebaseUI.is_enabled() => {
-                        ChildView::new(search_codebase_view).finish()
-                    }
+                    Some(search_codebase_view) => ChildView::new(search_codebase_view).finish(),
                     _ => {
                         let root_repo_path = root_repo_path?;
                         renderable_action(
@@ -1547,9 +1545,7 @@ fn render_search_codebase(
                 .finish()
             }
             AIActionStatus::RunningAsync => match props.search_codebase_view.get(id) {
-                Some(search_codebase_view) if FeatureFlag::SearchCodebaseUI.is_enabled() => {
-                    ChildView::new(search_codebase_view).finish()
-                }
+                Some(search_codebase_view) => ChildView::new(search_codebase_view).finish(),
                 _ => {
                     let root_repo_path = root_repo_path?;
                     renderable_action(
@@ -1566,9 +1562,7 @@ fn render_search_codebase(
                 }
             },
             AIActionStatus::Finished(result) => match props.search_codebase_view.get(id) {
-                Some(search_codebase_view) if FeatureFlag::SearchCodebaseUI.is_enabled() => {
-                    ChildView::new(search_codebase_view).finish()
-                }
+                Some(search_codebase_view) => ChildView::new(search_codebase_view).finish(),
                 _ => {
                     let AIAgentActionResultType::SearchCodebase(search_codebase_result) =
                         &result.result
