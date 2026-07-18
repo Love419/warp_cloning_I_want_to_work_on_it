@@ -211,9 +211,6 @@ pub enum FeatureFlag {
     /// New, less intrusive autoupdate UI.
     AutoupdateUIRevamp,
 
-    /// Enables Kitty image rendering
-    KittyImages,
-
     /// Enables support for Warp Packs.
     WarpPacks,
 
