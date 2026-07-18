@@ -73,7 +73,7 @@ use crate::settings::{
     MouseScrollMultiplier, OutlineCodebaseSymbolsForAtContextMenu, PreferLowPowerGPU,
     PreferredGraphicsBackend, QuakeModeSettings, ScrollSettings, ScrollSettingsChangedEvent,
     SelectionSettings, ShowAutosuggestionIgnoreButton, ShowChangelogAfterUpdate,
-    ShowTerminalInputMessageBar, SshSettings, SyntaxHighlighting, TabBehavior,
+    ShowTerminalInputMessageBar, SmoothScrolling, SshSettings, SyntaxHighlighting, TabBehavior,
     UserNativeRedirectPreference, VimModeEnabled, VimStatusBar, VimUnnamedSystemClipboard,
     DEFAULT_QUAKE_MODE_SIZE_PERCENTAGES, QUAKE_WINDOW_AUTOHIDE_SUPPORTED,
 };
@@ -736,6 +736,7 @@ pub enum FeaturesPageAction {
     ToggleSshReuseControlMaster,
     ToggleSnackbar,
     ToggleLinkTooltip,
+    ToggleSmoothScrolling,
     ToggleCompletionsOpenWhileTyping,
     ToggleCommandCorrections,
     ToggleErrorUnderlining,
@@ -937,6 +938,10 @@ impl FeaturesPageAction {
             Self::ToggleLinkTooltip => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleLinkTooltip".to_string(),
                 value: to_string(*GeneralSettings::as_ref(ctx).link_tooltip),
+            },
+            Self::ToggleSmoothScrolling => TelemetryEvent::FeaturesPageAction {
+                action: "ToggleSmoothScrolling".to_string(),
+                value: to_string(*ScrollSettings::as_ref(ctx).smooth_scrolling),
             },
             Self::ToggleCompletionsOpenWhileTyping => TelemetryEvent::FeaturesPageAction {
                 action: "ToggleCompletionsOpenWhileTyping".to_string(),
@@ -1859,6 +1864,13 @@ impl TypedActionView for FeaturesPageView {
                     report_if_error!(settings.link_tooltip.toggle_and_save_value(ctx));
                 });
             }
+            ToggleSmoothScrolling => {
+                ScrollSettings::handle(ctx).update(ctx, |scroll_settings, ctx| {
+                    report_if_error!(scroll_settings.smooth_scrolling.toggle_and_save_value(ctx));
+                });
+                // Keep the windowing layer's flag in sync so the change takes effect immediately.
+                warpui::set_smooth_scroll_enabled(*ScrollSettings::as_ref(ctx).smooth_scrolling);
+            }
             ToggleShowWarningBeforeQuitting => {
                 GeneralSettings::handle(ctx).update(ctx, |warning_settings, ctx| {
                     report_if_error!(warning_settings
@@ -2686,6 +2698,7 @@ impl FeaturesPageView {
 
         general_widgets.push(Box::new(SnackbarHeaderWidget::default()));
         general_widgets.push(Box::new(LinkTooltipWidget::default()));
+        general_widgets.push(Box::new(SmoothScrollingWidget::default()));
 
         #[cfg(feature = "local_fs")]
         {
@@ -4682,6 +4695,52 @@ impl SettingsWidget for SnackbarHeaderWidget {
                 .build()
                 .on_click(move |ctx, _, _| {
                     ctx.dispatch_typed_action(FeaturesPageAction::ToggleSnackbar)
+                })
+                .finish(),
+            None,
+        )
+    }
+}
+
+#[derive(Default)]
+struct SmoothScrollingWidget {
+    switch_state: SwitchStateHandle,
+}
+
+impl SettingsWidget for SmoothScrollingWidget {
+    type View = FeaturesPageView;
+
+    fn search_terms(&self) -> &str {
+        "smooth scrolling animate scroll wheel momentum"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let ui_builder = appearance.ui_builder();
+        render_body_item::<FeaturesPageAction>(
+            "Smooth scrolling".into(),
+            None,
+            LocalOnlyIconState::for_setting(
+                SmoothScrolling::storage_key(),
+                SmoothScrolling::sync_to_cloud(),
+                &mut view
+                    .button_mouse_states
+                    .local_only_icon_tooltip_states
+                    .borrow_mut(),
+                app,
+            ),
+            ToggleState::Enabled,
+            appearance,
+            ui_builder
+                .switch(self.switch_state.clone())
+                .check(*ScrollSettings::as_ref(app).smooth_scrolling)
+                .build()
+                .on_click(move |ctx, _, _| {
+                    ctx.dispatch_typed_action(FeaturesPageAction::ToggleSmoothScrolling);
                 })
                 .finish(),
             None,
