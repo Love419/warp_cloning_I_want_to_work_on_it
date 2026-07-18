@@ -21,6 +21,7 @@ use crate::ai::blocklist::agent_view::shortcuts::{
 };
 use crate::ai::blocklist::agent_view::AgentViewState;
 use crate::ai::blocklist::InputType;
+use crate::ai::connected_self_hosted_workers::ConnectedSelfHostedWorkersModel;
 use crate::ai::harness_availability::HarnessAvailabilityModel;
 use crate::appearance::Appearance;
 use crate::context_chips::spacing::{self};
@@ -575,15 +576,26 @@ impl Input {
         Some(ChildView::new(view).finish())
     }
 
+    /// Whether to show the Execution host dropdown: a default host is set or a
+    /// self-hosted worker is connected. Composer-only.
+    pub(super) fn should_show_host_selector(&self, app: &AppContext) -> bool {
+        let Some(host_selector) = self.host_selector() else {
+            return false;
+        };
+        host_selector.as_ref(app).has_default_host()
+            || !ConnectedSelfHostedWorkersModel::as_ref(app)
+                .worker_hosts_excluding(None)
+                .is_empty()
+    }
+
     fn render_cloud_mode_v2_top_row(&self, app: &AppContext) -> Box<dyn Element> {
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(CLOUD_MODE_V2_TOP_ROW_INNER_GAP);
 
-        // Only show the host selector when a default host is configured.
-        if let Some(host) = self.host_selector() {
-            if host.as_ref(app).has_default_host() {
+        if self.should_show_host_selector(app) {
+            if let Some(host) = self.host_selector() {
                 row.add_child(ChildView::new(host).finish());
             }
         }
