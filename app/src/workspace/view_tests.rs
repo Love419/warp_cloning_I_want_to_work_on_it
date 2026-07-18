@@ -3207,10 +3207,61 @@ fn test_open_tab_config_with_params_uses_explicit_title_template() {
                 Some("mesa-coyote".to_string())
             );
         });
-    });
-}
-#[test]
-fn test_toggle_tab_configs_menu_does_not_change_vertical_tabs_panel_in_horizontal_mode() {
+        });
+        }
+
+        #[test]
+        fn test_open_tab_config_with_params_rejects_nonexistent_cwd() {
+        App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        let workspace = mock_workspace(&mut app);
+        let cwd = std::env::temp_dir().join(format!(
+            "warp-tab-config-nonexistent-cwd-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(!cwd.exists());
+
+        let tab_config = crate::tab_configs::TabConfig {
+            name: "Missing cwd".to_string(),
+            title: None,
+            color: Some(AnsiColorIdentifier::Magenta),
+            panes: vec![TabConfigPaneNode {
+                id: "main".to_string(),
+                pane_type: Some(TabConfigPaneType::Terminal),
+                split: None,
+                children: None,
+                is_focused: Some(true),
+                directory: Some(cwd.display().to_string()),
+                commands: None,
+                shell: None,
+            }],
+            params: HashMap::new(),
+            source_path: Some(std::env::temp_dir().join("missing-cwd-tab-config.toml")),
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.open_tab_config_with_params(tab_config, HashMap::new(), None, ctx);
+        });
+
+        workspace.read(&app, |workspace, ctx| {
+            assert_eq!(workspace.tab_count(), 2);
+            assert_eq!(workspace.get_tab_color(1), Some(AnsiColorIdentifier::Magenta));
+
+            let active_pane_group = workspace.active_tab_pane_group();
+            active_pane_group.read(ctx, |pane_group, ctx| {
+                let terminal_view = pane_group.terminal_view_at_pane_index(0, ctx).unwrap();
+                let model = terminal_view.as_ref(ctx).model.lock();
+                assert_eq!(model.session_startup_path(), dirs::home_dir());
+            });
+
+            assert_eq!(workspace.toast_stack.as_ref(ctx).toast_count(), 1);
+        });
+        });
+        }
+
+        #[test]
+        fn test_toggle_tab_configs_menu_does_not_change_vertical_tabs_panel_in_horizontal_mode() {
     let _vertical_tabs_guard = FeatureFlag::VerticalTabs.override_enabled(true);
 
     App::test((), |mut app| async move {

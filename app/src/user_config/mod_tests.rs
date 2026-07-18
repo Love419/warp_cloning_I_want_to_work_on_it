@@ -174,3 +174,141 @@ fn test_load_tab_configs_skips_non_toml_files() {
     assert_eq!(configs.len(), 1);
     assert_eq!(configs[0].name, "Real");
 }
+
+#[cfg(feature = "local_fs")]
+fn write_tab_config_toml_with_directory(
+    dir: &Path,
+    file_name: &str,
+    config_name: &str,
+    directory: &str,
+) {
+    let path = dir.join(file_name);
+    let toml = format!(
+        r#"name = "{config_name}"
+
+[[panes]]
+id = "main"
+type = "terminal"
+directory = "{directory}"
+"#
+    );
+    std::fs::write(path, toml).unwrap();
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_allows_nonexistent_literal_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let nonexistent_dir = dir.path().join("does-not-exist");
+    write_tab_config_toml_with_directory(
+        dir.path(),
+        "invalid.toml",
+        "Invalid",
+        &nonexistent_dir.display().to_string(),
+    );
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Invalid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_allows_literal_directory_that_is_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("not-a-directory");
+    std::fs::write(&file_path, "not a directory").unwrap();
+    write_tab_config_toml_with_directory(
+        dir.path(),
+        "invalid.toml",
+        "Invalid",
+        &file_path.display().to_string(),
+    );
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Invalid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_accepts_existing_literal_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing_dir = tempfile::tempdir().unwrap();
+    write_tab_config_toml_with_directory(
+        dir.path(),
+        "valid.toml",
+        "Valid",
+        &existing_dir.path().display().to_string(),
+    );
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Valid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_expands_tilde_in_literal_directory() {
+    if !dirs::home_dir().is_some_and(|home_dir| home_dir.is_dir()) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    write_tab_config_toml_with_directory(dir.path(), "valid.toml", "Valid", "~");
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Valid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_allows_empty_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tab_config_toml_with_directory(dir.path(), "valid.toml", "Valid", "");
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Valid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_allows_missing_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tab_config_toml(dir.path(), "valid.toml", "Valid");
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Valid");
+}
+
+#[cfg(feature = "local_fs")]
+#[test]
+fn test_load_tab_configs_allows_parameterized_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tab_config_toml_with_directory(
+        dir.path(),
+        "parameterized.toml",
+        "Parameterized",
+        "{{repo}}/does-not-need-to-exist-yet",
+    );
+
+    let (configs, errors) = load_tab_configs(dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "Parameterized");
+}
