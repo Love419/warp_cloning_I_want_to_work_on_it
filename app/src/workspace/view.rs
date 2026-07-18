@@ -376,9 +376,7 @@ use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
-use crate::terminal::available_shells::AvailableShell;
-#[cfg(target_os = "windows")]
-use crate::terminal::available_shells::AvailableShells;
+use crate::terminal::available_shells::{AvailableShell, AvailableShells};
 use crate::terminal::block_list_viewport::InputMode;
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
@@ -2248,11 +2246,15 @@ impl Workspace {
                 let has_worktree = selection.enable_worktree;
                 let has_params = {
                     use crate::tab_configs::session_config::build_tab_config;
+                    let (shell_name, shell_family) =
+                        AvailableShells::as_ref(ctx).user_preferred_tab_config_shell(ctx);
                     let config = build_tab_config(
                         &selection.session_type,
                         &selection.directory,
                         selection.enable_worktree,
                         selection.autogenerate_worktree_branch_name,
+                        &shell_name,
+                        shell_family,
                     );
                     !config.params.is_empty()
                 };
@@ -2318,11 +2320,15 @@ impl Workspace {
         use crate::tab_configs::session_config::{build_tab_config, write_tab_config};
 
         // Build a TabConfig.
+        let (shell_name, shell_family) =
+            AvailableShells::as_ref(ctx).user_preferred_tab_config_shell(ctx);
         let config = build_tab_config(
             &selection.session_type,
             &selection.directory,
             selection.enable_worktree,
             selection.autogenerate_worktree_branch_name,
+            &shell_name,
+            shell_family,
         );
 
         let old_pane_group_id = self.active_tab_pane_group().id();
@@ -6923,8 +6929,14 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) {
         let tab_color = tab_config.color;
+        let default_shell_family = AvailableShells::as_ref(ctx).user_preferred_shell_family(ctx);
         let (rendered_title, pane_template) =
-            crate::tab_configs::render_tab_config(&tab_config, &param_values, worktree_branch_name);
+            crate::tab_configs::render_tab_config_with_shell_family(
+                &tab_config,
+                &param_values,
+                worktree_branch_name,
+                default_shell_family,
+            );
         self.add_tab_with_pane_layout(
             PanesLayout::Template(pane_template),
             Arc::new(HashMap::new()),
@@ -10828,11 +10840,15 @@ impl Workspace {
             warp_util::worktree_names::generate_worktree_branch_name(&branch_refs)
         };
 
+        let (shell_name, shell_family) =
+            AvailableShells::as_ref(ctx).user_preferred_tab_config_shell(ctx);
         let toml_content = crate::tab_configs::build_worktree_config_toml(
             &config_name,
             repo,
             base_branch,
             worktree_branch_name,
+            &shell_name,
+            shell_family,
         );
 
         let dir = tab_configs_dir();
@@ -10950,11 +10966,15 @@ impl Workspace {
             "Materializing default worktree config: repo_path={repo_path:?}, branch_name={branch_name:?}, pane_type={pane_type}"
         );
 
+        let (shell_name, shell_family) =
+            AvailableShells::as_ref(ctx).user_preferred_tab_config_shell(ctx);
         let (toml_content, tab_config) = match materialize_default_worktree_config(
             &template_toml,
             &config_name,
             &repo_path,
             pane_type,
+            &shell_name,
+            shell_family,
         ) {
             Ok(materialized) => materialized,
             Err(e) => {
