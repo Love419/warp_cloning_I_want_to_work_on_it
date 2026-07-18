@@ -1733,9 +1733,7 @@ impl<'a> TabComponent<'a> {
         // We preserve that behavior in the flag-OFF path out of an abundance of caution to avoid breaking existing functionality.
         let (parent_anchor, child_anchor, horizontal_inset) =
             if FeatureFlag::NewTabStyling.is_enabled() {
-                if FeatureFlag::TabCloseButtonOnLeft.is_enabled()
-                    && matches!(self.close_button_position, TabCloseButtonPosition::Left)
-                {
+                if matches!(self.close_button_position, TabCloseButtonPosition::Left) {
                     (
                         ParentAnchor::MiddleLeft,
                         ChildAnchor::MiddleLeft,
@@ -1748,9 +1746,7 @@ impl<'a> TabComponent<'a> {
                         -(TAB_CLOSE_BUTTON_HORIZONTAL_INSET + 4.0),
                     )
                 }
-            } else if FeatureFlag::TabCloseButtonOnLeft.is_enabled()
-                && matches!(self.close_button_position, TabCloseButtonPosition::Left)
-            {
+            } else if matches!(self.close_button_position, TabCloseButtonPosition::Left) {
                 (
                     ParentAnchor::TopLeft,
                     ChildAnchor::TopLeft,
