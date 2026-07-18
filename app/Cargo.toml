@@ -480,7 +480,6 @@ agent_mode_debug = []
 agent_mode_primary_xml = []
 agent_mode_pre_plan_xml = []
 agent_onboarding = []
-agent_shared_sessions = []
 ask_user_question = []
 async_find = []
 changelog = []
@@ -587,7 +586,6 @@ default = [
     "summarize_conversation_command",
     "inline_code_review",
     "web_search_ui",
-    "agent_shared_sessions",
     "integration_command",
     "artifact_command",
     "conversation_api",
