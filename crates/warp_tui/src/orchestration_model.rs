@@ -10,23 +10,27 @@
 //! Conversation lineage and ordering policy stay in `BlocklistAIHistoryModel`
 //! and the shared topology helpers.
 //!
-//! Native (Oz) local children run in background TUI sessions. Local
-//! CLI-harness and remote child requests resolve with an explicit failure.
+//! Native local and remote Oz children run in retained TUI sessions. Local
+//! CLI-harness requests resolve with an explicit failure.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use warp::tui_export::{
-    apply_child_agent_model_override, descendant_conversations_in_pill_order,
-    inherit_child_agent_settings, orchestration_root_conversation_id,
-    prepare_local_oz_child_launch, register_agent_event_consumer, unregister_agent_event_consumer,
-    AIConversationId, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, ConversationStatus,
-    Harness, RenderableAIError, StartAgentExecutionMode, StartAgentRequest,
+    apply_child_agent_model_override, classify_cloud_agent_startup_error,
+    descendant_conversations_in_pill_order, inherit_child_agent_settings,
+    orchestration_root_conversation_id, oz_run_url, prepare_local_oz_child_launch,
+    prepare_remote_child_launch, register_agent_event_consumer, unregister_agent_event_consumer,
+    AIConversationId, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, CloudAgentStartupIssue,
+    ConversationStatus, Harness, OrchestrationEventStreamer, OrchestrationEventStreamerEvent,
+    PreparedRemoteChildLaunch, RemoteChildLaunchConfig, RenderableAIError, ServerApiProvider,
+    StartAgentExecutionMode, StartAgentRequest,
 };
 use warpui::SingletonEntity;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, ViewHandle};
 
-use crate::session_registry::{TuiSessionId, TuiSessions};
+use crate::cloud_run::TuiCloudRunState;
+use crate::session_registry::{RegisteredRemoteChildSession, TuiSessionId, TuiSessions};
 use crate::tab_bar::TuiTabBarPagingState;
 use crate::terminal_session_view::TuiTerminalSessionView;
 
@@ -36,6 +40,7 @@ pub(crate) struct TuiOrchestrationChild {
     pub(crate) conversation_id: AIConversationId,
     pub(crate) label: String,
     pub(crate) spawn_index: usize,
+    pub(crate) status: ConversationStatus,
 }
 
 /// Live semantic state for the orchestration tab bar.
@@ -62,7 +67,7 @@ pub(crate) struct TuiOrchestrationModel {
     tab_bar_paging: TuiTabBarPagingState<AIConversationId>,
 }
 pub(crate) enum TuiOrchestrationEvent {
-    CreateLocalOzChildSession {
+    MaterializeLocalOz {
         parent_session_id: TuiSessionId,
         request: Box<StartAgentRequest>,
         model_id: Option<String>,
@@ -70,7 +75,12 @@ pub(crate) enum TuiOrchestrationEvent {
         task_id: warp::tui_export::AmbientAgentTaskId,
         conversation_name: String,
     },
-    RemoveChildSession(TuiSessionId),
+    MaterializeRemote {
+        parent_session_id: TuiSessionId,
+        request: Box<StartAgentRequest>,
+        prepared: Box<PreparedRemoteChildLaunch>,
+    },
+    RemoveSession(TuiSessionId),
 }
 
 pub(crate) struct MaterializedLocalOzChildSession {
@@ -93,6 +103,7 @@ impl TuiOrchestrationModel {
     /// Registers the singleton before sessions are created and wired to it.
     pub(crate) fn register(ctx: &mut AppContext) -> ModelHandle<Self> {
         let history = BlocklistAIHistoryModel::handle(ctx);
+        let streamer = OrchestrationEventStreamer::handle(ctx);
         let model = ctx.add_singleton_model(|_| Self {
             child_session_by_conversation: HashMap::new(),
             event_consumers_by_session: HashMap::new(),
@@ -134,6 +145,12 @@ impl TuiOrchestrationModel {
                 model_for_history.update(ctx, |model, ctx| model.topology_changed(ctx));
             }
         });
+        let model_for_streamer = model.clone();
+        ctx.subscribe_to_model(&streamer, move |_, event, ctx| {
+            model_for_streamer.update(ctx, |model, ctx| {
+                model.handle_streamer_event(event, ctx);
+            });
+        });
         model
     }
 
@@ -164,6 +181,7 @@ impl TuiOrchestrationModel {
                         .unwrap_or("Agent")
                         .to_owned(),
                     spawn_index: descendant.spawn_index,
+                    status: conversation.status().clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -256,16 +274,213 @@ impl TuiOrchestrationModel {
                     ctx,
                 );
             }
-            StartAgentExecutionMode::Remote { .. } => {
-                // TODO(code-1822): remote children need a TUI materializer;
-                // the GUI's spawn path is coupled to ambient-agent panes.
-                self.fail_child_request(
-                    &request,
-                    "Cloud child agents aren't supported in the Warp TUI yet.".to_string(),
+            StartAgentExecutionMode::Remote {
+                environment_id,
+                skill_references,
+                model_id,
+                computer_use_enabled,
+                worker_host,
+                harness_type,
+                title,
+                auth_secret_name,
+                agent_identity_uid,
+            } => {
+                self.register_event_consumer(
+                    parent_session_id,
+                    request.parent_conversation_id,
+                    ctx,
+                );
+                self.launch_remote_child(
+                    parent_session_id,
+                    request,
+                    RemoteChildLaunchConfig {
+                        environment_id,
+                        skill_references,
+                        model_id,
+                        computer_use_enabled,
+                        worker_host,
+                        harness_type,
+                        title,
+                        auth_secret_name,
+                        agent_identity_uid,
+                    },
                     ctx,
                 );
             }
         }
+    }
+
+    fn launch_remote_child(
+        &mut self,
+        parent_session_id: TuiSessionId,
+        request: StartAgentRequest,
+        config: RemoteChildLaunchConfig,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let prepared = match prepare_remote_child_launch(&request, config, ctx) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.fail_child_request(&request, error.user_message(), ctx);
+                return;
+            }
+        };
+        ctx.emit(TuiOrchestrationEvent::MaterializeRemote {
+            parent_session_id,
+            request: Box::new(request),
+            prepared: Box::new(prepared),
+        });
+    }
+
+    pub(crate) fn launch_registered_remote_child(
+        &mut self,
+        child: RegisteredRemoteChildSession,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let RegisteredRemoteChildSession {
+            session_id,
+            conversation_id,
+            surface_id,
+            cloud_run_state,
+            spawn_request,
+        } = child;
+        self.child_session_by_conversation
+            .insert(conversation_id, session_id);
+        let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
+        let cloud_run_state_for_launch = cloud_run_state.clone();
+        ctx.spawn(
+            async move { ai_client.spawn_agent(spawn_request).await },
+            move |me, result, ctx| {
+                me.finish_remote_child_launch(
+                    conversation_id,
+                    surface_id,
+                    cloud_run_state_for_launch,
+                    result,
+                    ctx,
+                );
+            },
+        );
+        ctx.notify();
+    }
+
+    fn finish_remote_child_launch(
+        &mut self,
+        conversation_id: AIConversationId,
+        child_surface_id: EntityId,
+        cloud_run_state: ModelHandle<TuiCloudRunState>,
+        result: anyhow::Result<warp::tui_export::SpawnAgentResponse>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match result {
+            Ok(response) => {
+                let run_url = oz_run_url(&response.run_id);
+                cloud_run_state.update(ctx, |state, ctx| {
+                    state.set_spawned(response.task_id, response.run_id.clone(), run_url, ctx);
+                });
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.assign_run_id_for_conversation(
+                        conversation_id,
+                        response.run_id,
+                        Some(response.task_id),
+                        child_surface_id,
+                        ctx,
+                    );
+                });
+            }
+            Err(error) => self.apply_remote_child_startup_issue(
+                conversation_id,
+                child_surface_id,
+                cloud_run_state,
+                classify_cloud_agent_startup_error(&error),
+                ctx,
+            ),
+        }
+    }
+
+    fn apply_remote_child_startup_issue(
+        &mut self,
+        conversation_id: AIConversationId,
+        child_surface_id: EntityId,
+        cloud_run_state: ModelHandle<TuiCloudRunState>,
+        issue: CloudAgentStartupIssue,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        match issue {
+            CloudAgentStartupIssue::Blocked(blocker) => {
+                let message = blocker.message().to_string();
+                cloud_run_state.update(ctx, |state, ctx| {
+                    state.set_blocked(blocker, ctx);
+                });
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.update_conversation_status(
+                        child_surface_id,
+                        conversation_id,
+                        ConversationStatus::Blocked {
+                            blocked_action: message,
+                        },
+                        ctx,
+                    );
+                });
+            }
+            CloudAgentStartupIssue::Failed(failure) => {
+                let message = failure.message().to_string();
+                cloud_run_state.update(ctx, |state, ctx| {
+                    state.set_failed(failure, ctx);
+                });
+                BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+                    history.update_conversation_status_with_error(
+                        child_surface_id,
+                        conversation_id,
+                        ConversationStatus::Error,
+                        Some(RenderableAIError::other(message, false)),
+                        ctx,
+                    );
+                });
+            }
+        }
+    }
+
+    fn handle_streamer_event(
+        &mut self,
+        event: &OrchestrationEventStreamerEvent,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let OrchestrationEventStreamerEvent::WatchedRunStatusChanged {
+            owner_conversation_id,
+            run_id,
+            status,
+        } = event
+        else {
+            return;
+        };
+        let child = {
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            let Some(conversation_id) = history.conversation_id_for_agent_id(run_id) else {
+                return;
+            };
+            let Some(conversation) = history.conversation(&conversation_id) else {
+                return;
+            };
+            let parent_matches = history
+                .resolved_parent_conversation_id_for_conversation(conversation)
+                == Some(*owner_conversation_id);
+            if !conversation.is_remote_child() || !parent_matches {
+                return;
+            }
+            let Some(surface_id) = history.terminal_surface_id_for_conversation(&conversation_id)
+            else {
+                return;
+            };
+            if TuiSessions::as_ref(ctx)
+                .session_id_for_surface(surface_id)
+                .is_none()
+            {
+                return;
+            }
+            (conversation_id, surface_id)
+        };
+        BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, ctx| {
+            history.update_conversation_status(child.1, child.0, status.clone(), ctx);
+        });
     }
 
     /// Starts server-side task creation. The completion callback creates the
@@ -285,7 +500,7 @@ impl TuiOrchestrationModel {
             ctx,
         );
         ctx.spawn(launch, move |me, result, ctx| match result {
-            Ok(prepared) => ctx.emit(TuiOrchestrationEvent::CreateLocalOzChildSession {
+            Ok(prepared) => ctx.emit(TuiOrchestrationEvent::MaterializeLocalOz {
                 parent_session_id,
                 request: Box::new(request),
                 model_id,
@@ -370,7 +585,7 @@ impl TuiOrchestrationModel {
             history.delete_conversation(*conversation_id, terminal_surface_id, ctx);
         });
         if let Some(session_id) = self.child_session_by_conversation.remove(conversation_id) {
-            ctx.emit(TuiOrchestrationEvent::RemoveChildSession(session_id));
+            ctx.emit(TuiOrchestrationEvent::RemoveSession(session_id));
         }
         ctx.notify();
     }
