@@ -1,29 +1,27 @@
-use crate::editor::Event as EditorEvent;
-use crate::modal::{Modal, ModalViewState};
-use crate::{
-    appearance::Appearance,
-    editor::{EditorView, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions, TextOptions},
-    ui_components::icons::Icon,
-    view_components::action_button::{ActionButton, DangerSecondaryTheme},
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use ::ai::api_keys::CustomEndpoint;
+use url::Url;
 use warp_editor::editor::NavigationKey;
-use warpui::elements::{ConstrainedBox, CrossAxisAlignment, Expanded, MainAxisSize};
+use warpui::elements::{
+    Border, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty,
+    Expanded, Flex, MainAxisSize, MouseStateHandle, ParentElement, Radius, Text,
+};
+use warpui::fonts::FamilyId;
+use warpui::ui_components::button::ButtonVariant;
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::{
-    elements::{
-        Border, ChildView, Container, CornerRadius, Empty, Flex, MouseStateHandle, ParentElement,
-        Radius, Text,
-    },
-    fonts::FamilyId,
-    ui_components::{
-        button::ButtonVariant,
-        components::{Coords, UiComponent, UiComponentStyles},
-    },
     AppContext, Element, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
 };
 
-use ::ai::api_keys::CustomEndpoint;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use url::Url;
+use crate::appearance::{Appearance, AppearanceEvent};
+use crate::editor::{
+    EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
+    TextOptions,
+};
+use crate::modal::{Modal, ModalViewState};
+use crate::ui_components::icons::Icon;
+use crate::view_components::action_button::{ActionButton, DangerSecondaryTheme};
 
 const LABEL_FONT_SIZE: f32 = 12.;
 const INPUT_WIDTH: f32 = 480.;
@@ -88,6 +86,13 @@ impl CustomEndpointModal {
         editing_index: Option<usize>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        // Editor text colors are snapshotted at construction via
+        // `text_colors_override`, so refresh them whenever the theme changes.
+        ctx.subscribe_to_model(&Appearance::handle(ctx), |me, _, event, ctx| {
+            if let AppearanceEvent::ThemeChanged = event {
+                me.update_editor_text_colors(ctx);
+            }
+        });
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
 
@@ -354,6 +359,28 @@ impl CustomEndpointModal {
             });
             row.alias_editor.update(ctx, |editor, ctx| {
                 editor.clear_buffer_and_reset_undo_stack(ctx);
+            });
+        }
+    }
+
+    /// Re-applies theme-derived text colors to every editor in the modal.
+    /// Called on appearance changes since editors only snapshot their text
+    /// colors at construction.
+    fn update_editor_text_colors(&mut self, ctx: &mut ViewContext<Self>) {
+        let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
+        let mut editors = vec![
+            self.endpoint_name_editor.clone(),
+            self.endpoint_url_editor.clone(),
+            self.api_key_editor.clone(),
+        ];
+        for row in &self.model_rows {
+            editors.push(row.name_editor.clone());
+            editors.push(row.alias_editor.clone());
+        }
+        for editor in editors {
+            let colors = text_colors.clone();
+            editor.update(ctx, move |editor, ctx| {
+                editor.set_text_colors(colors, ctx);
             });
         }
     }

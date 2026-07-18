@@ -1,20 +1,23 @@
-use crate::ai::execution_profiles::{
-    ActionPermission, ComputerUsePermission, WriteToPtyPermission,
-};
-use crate::ai::llms::LLMModelHost;
-use crate::{auth::UserUid, server::ids::ServerId, settings::AgentModeCommandExecutionPredicate};
+use std::cmp::Ordering;
+use std::path::PathBuf;
+
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, path::PathBuf};
 use warp_graphql::billing::{AddonCreditAutoReloadStatus, ServiceAgreement, ServiceAgreementType};
-
 pub use warp_graphql::billing::{
     AiCreditsUsageAndCostSubjectType, AiCreditsUsageAndCostType, AiCreditsUsageBucket,
     AiCreditsUsageSource,
 };
 
 use super::team::{MembershipRole, Team};
+use crate::ai::execution_profiles::{
+    ActionPermission, ComputerUsePermission, WriteToPtyPermission,
+};
+use crate::ai::llms::LLMModelHost;
+use crate::auth::UserUid;
+use crate::server::ids::ServerId;
+use crate::settings::AgentModeCommandExecutionPredicate;
 
 #[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
 pub struct WorkspaceUid(ServerId);
@@ -744,6 +747,17 @@ mod tests;
 pub struct LlmHostSettings {
     pub enabled: bool,
     pub enablement_setting: HostEnablementSetting,
+    /// Full resource name of the GCP workload identity provider that Gemini Enterprise
+    /// (GEAP) credential minting exchanges Warp OIDC JWTs against. Only populated on the
+    /// `GeminiEnterprise` host entry; `None` for other hosts and for workspace caches
+    /// written before this field existed.
+    #[serde(default)]
+    pub gcp_audience: Option<String>,
+    /// Email of the GCP service account that Gemini Enterprise credential minting
+    /// impersonates after the STS exchange. `None` (or empty) means the federated token
+    /// is used directly.
+    #[serde(default)]
+    pub gcp_sa_email: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

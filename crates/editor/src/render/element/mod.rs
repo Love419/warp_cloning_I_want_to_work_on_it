@@ -1,51 +1,51 @@
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use float_cmp::ApproxEq;
 use instant::Instant;
 use parking_lot::Mutex;
-use std::{
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use string_offset::CharOffset;
 use temporary_block::RenderableTemporaryBlock;
 use vim::vim::VimMode;
 use warp_core::ui::theme::Fill as ThemeFill;
-use warpui::{
+use warpui_core::color::ColorU;
+use warpui_core::elements::new_scrollable::{NewScrollableElement, ScrollableAxis};
+use warpui_core::elements::{
+    Axis, Border, Dash, Point, ScrollData, ScrollableElement, Vector2FExt, ZIndex,
+};
+use warpui_core::event::{DispatchedEvent, ModifiersState};
+use warpui_core::geometry::rect::RectF;
+use warpui_core::geometry::vector::{Vector2F, vec2f};
+use warpui_core::platform::Cursor;
+use warpui_core::units::{IntoPixels, Pixels};
+use warpui_core::{
     AfterLayoutContext, AppContext, Element, Event, EventContext, LayoutContext, ModelHandle,
     PaintContext, SizeConstraint, WeakViewHandle,
-    color::ColorU,
-    elements::{
-        Axis, Border, Dash, Point, ScrollData, ScrollableElement, Vector2FExt, ZIndex,
-        new_scrollable::{NewScrollableElement, ScrollableAxis},
-    },
-    event::{DispatchedEvent, ModifiersState},
-    geometry::{
-        rect::RectF,
-        vector::{Vector2F, vec2f},
-    },
-    platform::Cursor,
-    units::{IntoPixels, Pixels},
 };
 
-use super::model::{
-    BlockItem, ElementUpdate, HitTestOptions, Location, RenderState, RichTextStyles, UNIT_MARGIN,
-    viewport::{SizeInfo, ViewportItem},
-};
-use crate::{content::version::BufferVersion, editor::EditorView};
-use string_offset::CharOffset;
-
-use self::{
-    empty::Empty, header::RenderableHeader, hidden_section::RenderableHiddenSection,
-    horizontal_rule::HorizontalRule, image::RenderableImage, mermaid::RenderableMermaidDiagram,
-    ordered_list::RenderableOrderedListItem, paragraph::RenderableParagraph,
-    runnable_command::RenderableRunnableCommand, table::RenderableTable,
-    task_list::RenderableTaskList, text_block::RenderableTextBlock,
-    unordered_list::RenderableBulletList,
-};
-
+use self::empty::Empty;
+use self::header::RenderableHeader;
+use self::hidden_section::RenderableHiddenSection;
+use self::horizontal_rule::HorizontalRule;
+use self::image::RenderableImage;
+use self::mermaid::RenderableMermaidDiagram;
+use self::ordered_list::RenderableOrderedListItem;
 pub use self::paint::{CursorData, CursorDisplayType, RenderContext};
+use self::paragraph::RenderableParagraph;
+use self::runnable_command::RenderableRunnableCommand;
+use self::table::RenderableTable;
+use self::task_list::RenderableTaskList;
+use self::text_block::RenderableTextBlock;
+use self::unordered_list::RenderableBulletList;
+use super::model::viewport::{SizeInfo, ViewportItem};
+use super::model::{
+    BlockItem, ElementUpdate, HitTestOptions, Location, RenderLineLocation, RenderState,
+    RichTextStyles, UNIT_MARGIN,
+};
+use crate::content::version::BufferVersion;
+use crate::editor::EditorView;
 
 pub mod broken_embedding;
 mod empty;
@@ -85,7 +85,7 @@ pub enum VerticalExpansionBehavior {
 /// An element that renders rich text, with no additional UI or decorations.
 ///
 /// This element caches the positions listed in [`super::model::saved_positions::SavedPositions`],
-/// and the parent view can overlay UI controls on top of them using a [`warpui::elements::Stack`].
+/// and the parent view can overlay UI controls on top of them using a [`warpui_core::elements::Stack`].
 ///
 /// It additionally reserves horizontal gutters, which are considered in-bounds for content hit
 /// testing.
@@ -282,8 +282,12 @@ pub trait RenderableBlock {
         false
     }
 
-    fn is_embedded_comment(&self) -> bool {
-        false
+    /// The anchor of the inline comment block backing this renderable, or `None` if this block is
+    /// not an inline comment. Carrying the anchor on the renderable lets gutter rendering classify
+    /// comment rows (including the removed-line side) without a per-frame reverse lookup into the
+    /// content tree.
+    fn embedded_comment_location(&self) -> Option<RenderLineLocation> {
+        None
     }
 
     fn finish(self) -> Box<dyn RenderableBlock>
@@ -907,7 +911,7 @@ impl<V: EditorView> RichTextElement<V> {
                     BlockItem::Table { .. } => RenderableTable::new(item).finish(),
                     BlockItem::TrailingNewLine(_) => Empty::new(item).finish(),
                     BlockItem::Hidden { .. } => RenderableHiddenSection::new(item, ctx).finish(),
-                    BlockItem::Embedded(embed) => {
+                    BlockItem::Embedded(embed) | BlockItem::EmbeddedComment { item: embed, .. } => {
                         let start_offset = item.block_offset;
                         let child_model = parent.embedded_item_at(start_offset, ctx);
                         embed.element(model, item, child_model, ctx)
@@ -1085,7 +1089,7 @@ impl<V: EditorView> Element for RichTextElement<V> {
             return;
         };
         ctx.scene
-            .start_layer(warpui::ClipBounds::BoundedBy(clip_bounds));
+            .start_layer(warpui_core::ClipBounds::BoundedBy(clip_bounds));
         // Save the clipped content layer z-index for hover detection.
         self.content_z_index = Some(ctx.scene.z_index());
 
@@ -1244,7 +1248,7 @@ impl<V: EditorView> NewScrollableElement for RichTextElement<V> {
         })
     }
 
-    fn scroll(&mut self, delta: warpui::units::Pixels, axis: Axis, ctx: &mut EventContext) {
+    fn scroll(&mut self, delta: warpui_core::units::Pixels, axis: Axis, ctx: &mut EventContext) {
         if let Some(action) = V::Action::scroll(delta, axis) {
             ctx.dispatch_typed_action(action);
         }
@@ -1265,7 +1269,7 @@ impl<V: EditorView> ScrollableElement for RichTextElement<V> {
         Some(self.vertical_scroll_data(app))
     }
 
-    fn scroll(&mut self, delta: warpui::units::Pixels, ctx: &mut EventContext) {
+    fn scroll(&mut self, delta: warpui_core::units::Pixels, ctx: &mut EventContext) {
         if let Some(action) = V::Action::scroll(delta, Axis::Vertical) {
             ctx.dispatch_typed_action(action);
         }

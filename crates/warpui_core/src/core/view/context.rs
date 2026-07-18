@@ -1,34 +1,28 @@
-use std::{any::Any, marker::PhantomData, rc::Rc, sync::Arc};
+use std::any::Any;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use futures::future::{AbortHandle, Abortable};
 use futures::{Future, FutureExt};
 use pathfinder_geometry::rect::RectF;
 use thiserror::Error;
 
+use super::handle::{AnyViewHandle, ReadView, UpdateView, ViewAsRef, ViewHandle, WeakViewHandle};
+use super::{TypedActionView, View};
+use crate::accessibility::AccessibilityContent;
+use crate::core::{Observation, Subscription, SubscriptionKey, TaskCallback};
+use crate::fonts::Cache as FontCache;
 use crate::modals::{AlertDialogWithCallbacks, ModalButton, ViewModalCallback};
-use crate::platform::{
-    file_picker::{FilePickerConfiguration, FilePickerError},
-    Cursor, SaveFilePickerConfiguration, TerminationMode,
-};
-use crate::r#async::SpawnableOutput;
+use crate::notification::{NotificationSendError, RequestPermissionsOutcome, UserNotification};
+use crate::platform::file_picker::{FilePickerConfiguration, FilePickerError};
+use crate::platform::{Cursor, SaveFilePickerConfiguration, TerminationMode};
+use crate::r#async::executor::{Background, Foreground};
+use crate::r#async::{SpawnableOutput, SpawnedFutureHandle, SpawnedLocalStream};
 use crate::windowing::WindowManager;
 use crate::{
-    accessibility::AccessibilityContent,
-    core::{Observation, Subscription, SubscriptionKey, TaskCallback},
-    fonts::Cache as FontCache,
-    notification::{NotificationSendError, RequestPermissionsOutcome, UserNotification},
-    r#async::{
-        executor::{Background, Foreground},
-        SpawnedFutureHandle, SpawnedLocalStream,
-    },
-    Action, AppContext, Effect, Entity, EntityId, ModelAsRef, ModelContext, ModelHandle,
-    UpdateModel, WindowId,
-};
-use crate::{GetSingletonModelHandle, ReadModel};
-
-use super::{
-    handle::{AnyViewHandle, ReadView, UpdateView, ViewAsRef, ViewHandle, WeakViewHandle},
-    TypedActionView, View,
+    Action, AppContext, Effect, Entity, EntityId, GetSingletonModelHandle, ModelAsRef,
+    ModelContext, ModelHandle, ReadModel, UpdateModel, WindowId,
 };
 
 /// Structure that combines view identifiers and a handle to the application
@@ -832,9 +826,11 @@ impl<V> ViewSpawner<V> {
         work: impl FnOnce(&mut V, &mut ViewContext<V>) -> R + Send + 'static,
     ) -> Result<R, ViewDropped> {
         let (tx, rx) = futures::channel::oneshot::channel();
+        let span = tracing::Span::current();
 
         self.task_sender
             .send(Box::new(move |me, ctx| {
+                let _guard = span.enter();
                 let result = work(me, ctx);
                 // If the background task has dropped the receiver, then we don't need to send
                 // the result, and there's no one to inform regardless.

@@ -1,36 +1,32 @@
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::Vector2F;
 use settings::Setting;
-use warp_core::ui::{appearance::Appearance, Icon};
+use warp_core::ui::appearance::Appearance;
+use warp_core::ui::Icon;
+use warpui::elements::{
+    ConstrainedBox, Container, CrossAxisAlignment, Empty, Expanded, Flex, Hoverable, MainAxisSize,
+    MouseStateHandle, ParentElement, SavePosition, Shrinkable, Text,
+};
+use warpui::fonts::Weight::Bold;
+use warpui::fonts::{Properties, Style};
+use warpui::platform::Cursor;
+use warpui::prelude::{Border, CornerRadius, Radius};
+use warpui::text_layout::ClipConfig;
 use warpui::{
-    elements::{
-        ConstrainedBox, Container, CrossAxisAlignment, Empty, Expanded, Flex, Hoverable,
-        MainAxisSize, MouseStateHandle, ParentElement, SavePosition, Shrinkable, Text,
-    },
-    fonts::{Properties, Style, Weight::Bold},
-    platform::Cursor,
-    prelude::{Border, CornerRadius, Radius},
-    text_layout::ClipConfig,
     AppContext, Element, Entity, EntityId, EventContext, ModelHandle, SingletonEntity,
     TypedActionView, View, ViewContext,
 };
 
-use crate::{
-    ai::{
-        active_agent_views_model::ActiveAgentViewsModel, agent::conversation::AIConversationId,
-        blocklist::BlocklistAIHistoryEvent,
-    },
-    terminal::BlockListSettings,
-    ui_components::{
-        blended_colors,
-        icon_with_status::{render_icon_with_status, IconWithStatusVariant},
-    },
-    view_components::DismissibleToast,
-    workspace::{ToastStack, WorkspaceAction},
-    BlocklistAIHistoryModel,
-};
-
 use super::{AgentViewController, AgentViewEntryOrigin};
+use crate::ai::active_agent_views_model::ActiveAgentViewsModel;
+use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::blocklist::BlocklistAIHistoryEvent;
+use crate::terminal::BlockListSettings;
+use crate::ui_components::blended_colors;
+use crate::ui_components::icon_with_status::{render_icon_with_status, IconWithStatusVariant};
+use crate::view_components::DismissibleToast;
+use crate::workspace::{ToastStack, WorkspaceAction};
+use crate::BlocklistAIHistoryModel;
 
 #[derive(Default)]
 struct StateHandles {
@@ -92,7 +88,6 @@ impl AgentViewEntryBlock {
             _ => (),
         });
         ctx.subscribe_to_model(&agent_view_controller, |_, _, _, ctx| ctx.notify());
-
         let active_agent_views_model = ActiveAgentViewsModel::handle(ctx);
         ctx.subscribe_to_model(&active_agent_views_model, |_, _, _, ctx| ctx.notify());
 
@@ -264,7 +259,7 @@ impl View for AgentViewEntryBlock {
             // If the agent_view_block's conversation no longer exists,
             // we assume that it has been deleted.
             return render_deleted_state(
-                self.origin,
+                self.origin.clone(),
                 self.cached_title.clone(),
                 appearance,
                 are_block_dividers_enabled,
@@ -302,7 +297,7 @@ impl View for AgentViewEntryBlock {
             Some("Restored")
         } else if !self.is_new
             && !matches!(
-                self.origin,
+                &self.origin,
                 AgentViewEntryOrigin::LongRunningCommand
                     | AgentViewEntryOrigin::AgentRequestedNewConversation
             )
@@ -384,7 +379,7 @@ impl View for AgentViewEntryBlock {
             .with_child(Container::new(fork_button).with_margin_left(8.).finish())
             .with_child(open_conversation_button);
 
-        let origin = self.origin;
+        let origin = self.origin.clone();
         let entry_block_id = self.view_id;
         let entry_block_position_id = get_agent_view_entry_block_position_id(entry_block_id);
         SavePosition::new(
@@ -395,7 +390,7 @@ impl View for AgentViewEntryBlock {
                     blended_colors::fg_overlay_1(appearance.theme())
                 };
                 render_block_container(
-                    origin,
+                    origin.clone(),
                     row.finish(),
                     background.into(),
                     appearance,

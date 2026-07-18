@@ -1,23 +1,24 @@
 #![allow(dead_code)]
 
-use crate::ai::blocklist::TextLocation;
-use crate::terminal::model::index::Point;
+use std::collections::HashMap;
+use std::ops::{Not, RangeInclusive};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use rangemap::{RangeInclusiveMap, StepLite};
-use std::collections::HashMap;
-use std::ops::{Not, RangeInclusive};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use warpui::elements::SecretRange;
 use warpui::EntityId;
 
 use super::grid::grid_handler::GridHandler;
 use super::grid::{Dimensions as _, RespectDisplayedOutput};
 use super::terminal_model::RangeInModel;
+use crate::ai::blocklist::TextLocation;
 use crate::terminal::model::find::RegexDFAs;
+use crate::terminal::model::index::Point;
 
 /// A regex pattern that can be used to detect secrets in text.
 pub struct SecretsRegex {
@@ -53,7 +54,7 @@ lazy_static! {
         Arc::new(SecretsRegex {
             regex: regex_automata::meta::Regex::new_many(&[] as &[&str])
                 .expect("should be able to construct empty regex"),
-            dfas: RegexDFAs::new_many(&[], true, true).expect("should be able to construct empty regex DFA"),
+            dfas: RegexDFAs::new_many(&[], false, true).expect("should be able to construct empty regex DFA"),
             level_metadata: RegexLevelMetadata {
                 enterprise_count: 0,
                 user_count: 0,
@@ -372,7 +373,7 @@ pub fn set_user_and_enterprise_secret_regexes<'a>(
 
     // Make sure we can compile both the regex and the DFA before we attempt to replace the live
     // ones.
-    let dfas = match RegexDFAs::new_many(&all_secrets, true, true) {
+    let dfas = match RegexDFAs::new_many(&all_secrets, false, true) {
         Ok(dfas) => dfas,
         Err(err) => {
             log::error!("Failed to construct new RegexDFA with combined secrets: {err:?}");

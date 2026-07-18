@@ -1,56 +1,8 @@
-use super::admin_actions::AdminActions;
-use super::settings_page::{render_customer_type_badge, MatchData, PageType, SettingsWidget};
-use super::transfer_ownership_confirmation_modal::{
-    TransferOwnershipConfirmationEvent, TransferOwnershipConfirmationModal,
-};
-use super::SettingsSection;
-use super::{
-    settings_page::{
-        render_separator, render_sub_header, SettingsPageMeta, SettingsPageViewHandle,
-    },
-    tab_menu::Tabs,
-};
-
-use crate::ai::AIRequestUsageModel;
-use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
-use crate::auth::auth_state::AuthState;
-use crate::auth::auth_view_modal::AuthViewVariant;
-use crate::auth::{AuthStateProvider, UserUid};
-use crate::menu::{self, Menu, MenuItem, MenuItemFields};
-use crate::modal::{Modal, ModalEvent, ModalViewState};
-use crate::pricing::PricingInfoModel;
-use crate::view_components::ToastFlavor;
-use crate::workspaces::team::{MembershipRole, TeamDeleteDisabledReason};
-use crate::{
-    appearance::Appearance,
-    channel::ChannelState,
-    cloud_object::{model::persistence::CloudModel, CloudObjectEventEntrypoint, Space},
-    drive::cloud_action_confirmation_dialog::{
-        CloudActionConfirmationDialog, CloudActionConfirmationDialogEvent,
-        CloudActionConfirmationDialogVariant,
-    },
-    editor::{
-        EditorView, Event as EditorEvent, InteractionState, SingleLineEditorOptions, TextOptions,
-    },
-    network::NetworkStatus,
-    send_telemetry_from_ctx,
-    server::{
-        cloud_objects::update_manager::UpdateManager, ids::ServerId, telemetry::TelemetryEvent,
-    },
-    themes::{self, theme::Blend},
-    ui_components::icons::Icon,
-    view_components::{ClickableTextInput, ClickableTextInputAction, ClickableTextInputEvent},
-    word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEditorViewEvent},
-    workspace::WorkspaceAction,
-    workspaces::{
-        team::{DiscoverableTeam, Team},
-        update_manager::{TeamUpdateManager, TeamUpdateManagerEvent},
-        user_workspaces::{UserWorkspaces, UserWorkspacesEvent},
-        workspace::{BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy},
-    },
-};
-
 use core::default::Default;
+use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use email_address::EmailAddress;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -58,31 +10,74 @@ use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::vec2f;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::{cmp::Ordering, collections::HashSet};
-use warp_core::{features::FeatureFlag, ui::theme::color::internal_colors};
-use warpui::FocusContext;
-
+use warp_core::features::FeatureFlag;
+use warp_core::ui::theme::color::internal_colors;
+use warpui::clipboard::ClipboardContent;
+use warpui::elements::{
+    Align, Border, ChildAnchor, ClippedScrollStateHandle, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, Element, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    SavePosition, ScrollTarget, ScrollToPositionMode, Shrinkable, Stack, Text,
+};
+use warpui::fonts::{Properties, Weight};
+use warpui::platform::Cursor;
+use warpui::presenter::ChildView;
+use warpui::ui_components::button::{ButtonVariant, TextAndIcon, TextAndIconAlignment};
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::ui_components::switch::SwitchStateHandle;
+use warpui::ui_components::text_input::TextInput;
 use warpui::{
-    clipboard::ClipboardContent,
-    elements::{
-        Align, Border, ChildAnchor, ClippedScrollStateHandle, ConstrainedBox, Container,
-        CornerRadius, CrossAxisAlignment, Element, Flex, Hoverable, MainAxisAlignment,
-        MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
-        ParentOffsetBounds, Radius, SavePosition, ScrollTarget, ScrollToPositionMode, Shrinkable,
-        Stack, Text,
-    },
-    fonts::{Properties, Weight},
-    platform::Cursor,
-    presenter::ChildView,
-    ui_components::{
-        button::{ButtonVariant, TextAndIcon, TextAndIconAlignment},
-        components::{Coords, UiComponent, UiComponentStyles},
-        switch::SwitchStateHandle,
-        text_input::TextInput,
-    },
-    AppContext, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle,
+    AppContext, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle,
+};
+
+use super::admin_actions::AdminActions;
+use super::settings_page::{
+    render_customer_type_badge, render_separator, render_sub_header, MatchData, PageType,
+    SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
+};
+use super::tab_menu::Tabs;
+use super::transfer_ownership_confirmation_modal::{
+    TransferOwnershipConfirmationEvent, TransferOwnershipConfirmationModal,
+};
+use super::SettingsSection;
+use crate::ai::AIRequestUsageModel;
+use crate::appearance::Appearance;
+use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
+use crate::auth::auth_state::AuthState;
+use crate::auth::auth_view_modal::AuthViewVariant;
+use crate::auth::{AuthStateProvider, UserUid};
+use crate::channel::ChannelState;
+use crate::cloud_object::model::persistence::CloudModel;
+use crate::cloud_object::{CloudObjectEventEntrypoint, Space};
+use crate::drive::cloud_action_confirmation_dialog::{
+    CloudActionConfirmationDialog, CloudActionConfirmationDialogEvent,
+    CloudActionConfirmationDialogVariant,
+};
+use crate::editor::{
+    EditorView, Event as EditorEvent, InteractionState, SingleLineEditorOptions, TextOptions,
+};
+use crate::menu::{self, Menu, MenuItem, MenuItemFields};
+use crate::modal::{Modal, ModalEvent, ModalViewState};
+use crate::network::NetworkStatus;
+use crate::pricing::PricingInfoModel;
+use crate::send_telemetry_from_ctx;
+use crate::server::cloud_objects::update_manager::UpdateManager;
+use crate::server::ids::ServerId;
+use crate::server::telemetry::TelemetryEvent;
+use crate::themes::theme::Blend;
+use crate::themes::{self};
+use crate::ui_components::icons::Icon;
+use crate::view_components::{
+    ClickableTextInput, ClickableTextInputAction, ClickableTextInputEvent, ToastFlavor,
+};
+use crate::word_block_editor::{ChipEditorState, WordBlockEditorView, WordBlockEditorViewEvent};
+use crate::workspace::WorkspaceAction;
+use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDeleteDisabledReason};
+use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::workspace::{
+    BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy,
 };
 
 const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header";
@@ -110,6 +105,7 @@ const TEXT_FIELD_TOP_PADDING: f32 = 12.;
 const HORIZONTAL_BAR_TO_SUB_HEADER_PADDING: f32 = 9.;
 const SUBSECTION_HEADER_FONT_SIZE: f32 = 18.;
 const SUBSUBSECTION_HEADER_FONT_SIZE: f32 = 14.;
+const OWNER_STATE_CHIP_ACCENT_OPACITY: u8 = 30;
 
 const INVITE_LINK_PREFIX: &str = "/team/";
 const INVALID_DOMAINS_INSTRUCTIONS: &str =
@@ -135,6 +131,13 @@ lazy_static! {
     static ref PAST_DUE_BADGE_COLOR: ColorU = ColorU::new(254, 253, 194, 255);
     static ref UNPAID_BADGE_COLOR: ColorU = ColorU::new(255, 130, 114, 255);
     static ref DELINQUENCY_BADGE_TEXT_COLOR: ColorU = ColorU::new(0, 0, 0, 190);
+}
+
+fn owner_state_chip_text_color(theme: &themes::theme::WarpTheme) -> ColorU {
+    let chip_background = theme
+        .background()
+        .blend(&theme.accent().with_opacity(OWNER_STATE_CHIP_ACCENT_OPACITY));
+    theme.main_text_color(chip_background).into_solid()
 }
 
 #[derive(Debug, Clone)]
@@ -3507,14 +3510,20 @@ impl TeamsWidget {
                         );
                     }
                     ItemState::Owner => {
-                        pending_and_close_row.add_child(self.render_state_chip(
-                            appearance,
-                            "OWNER".into(),
-                            appearance.theme().accent().into(),
-                            appearance.theme().accent().with_opacity(30).into(),
-                            appearance.ui_font_size() - 1.,
-                            Weight::Normal,
-                        ));
+                        pending_and_close_row.add_child(
+                            self.render_state_chip(
+                                appearance,
+                                "OWNER".into(),
+                                owner_state_chip_text_color(appearance.theme()),
+                                appearance
+                                    .theme()
+                                    .accent()
+                                    .with_opacity(OWNER_STATE_CHIP_ACCENT_OPACITY)
+                                    .into(),
+                                appearance.ui_font_size() - 1.,
+                                Weight::Normal,
+                            ),
+                        );
                     }
                     ItemState::Admin => {
                         pending_and_close_row.add_child(
@@ -4428,4 +4437,31 @@ pub fn test_valid_domains() {
     assert!(TeamsPageView::is_valid_domain("warp0.dev0"));
     assert!(TeamsPageView::is_valid_domain("warp.dev"));
     assert!(TeamsPageView::is_valid_domain("miniclip.com"));
+}
+
+#[cfg(test)]
+#[test]
+pub fn test_owner_state_chip_text_contrasts_with_accent_overlay() {
+    let theme_config = themes::theme::WarpThemeConfig::new();
+
+    for theme_kind in [
+        themes::theme::ThemeKind::CyberWave,
+        themes::theme::ThemeKind::WillowDream,
+        themes::theme::ThemeKind::SolarFlare,
+    ] {
+        let theme = theme_config.theme(&theme_kind);
+        let chip_background = theme
+            .background()
+            .blend(&theme.accent().with_opacity(OWNER_STATE_CHIP_ACCENT_OPACITY));
+        let text_color = owner_state_chip_text_color(&theme);
+
+        assert!(
+            crate::util::color::high_enough_contrast(
+                text_color,
+                chip_background.into_solid(),
+                crate::util::color::MinimumAllowedContrast::Text,
+            ),
+            "{theme_kind} owner chip text should contrast with its accent overlay"
+        );
+    }
 }

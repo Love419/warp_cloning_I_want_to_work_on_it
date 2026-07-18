@@ -1,4 +1,5 @@
-use crate::{request_context::RequestContext, schema};
+use crate::request_context::RequestContext;
+use crate::schema;
 
 #[derive(cynic::QueryVariables, Debug)]
 pub struct GetFeatureModelChoicesVariables {
@@ -71,6 +72,7 @@ pub enum LlmModelHost {
     AwsBedrock,
     CustomEndpoint,
     DirectApi,
+    GeminiEnterprise,
     #[cynic(fallback)]
     Other(String),
 }

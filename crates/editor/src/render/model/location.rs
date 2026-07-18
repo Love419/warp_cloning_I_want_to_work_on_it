@@ -1,14 +1,13 @@
 //! Hit-testing implementation for the rendering model.
 
 use num_traits::SaturatingSub;
-use sum_tree::SeekBias;
-use warpui::units::{IntoPixels, Pixels};
-
 use string_offset::CharOffset;
+use sum_tree::SeekBias;
+use warpui_core::units::{IntoPixels, Pixels};
 
+use super::positioned::{Positioned, PositionedCursor};
 use super::{
     BlockItem, Height, HitTestBlockType, LayoutSummary, ParagraphBlock, RenderState, bounds,
-    positioned::{Positioned, PositionedCursor},
 };
 
 #[cfg(test)]
@@ -219,6 +218,7 @@ impl<'a> Positioned<'a, BlockItem> {
             | BlockItem::Image { .. }
             | BlockItem::TrailingNewLine(_)
             | BlockItem::TemporaryBlock { .. }
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::Hidden { .. } => Location::Text {
                 char_offset: self.start_char_offset,
                 clamped: true,

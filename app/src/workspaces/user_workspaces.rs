@@ -1,51 +1,42 @@
-use super::{
-    team::{DiscoverableTeam, MembershipRole, Team},
-    workspace::{
-        AdminEnablementSetting, CustomerType, EnterpriseSecretRegex, HostEnablementSetting,
-        UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
-    },
-};
-use crate::{
-    ai::llms::LLMModelHost,
-    auth::{AuthStateProvider, UserUid},
-    channel::ChannelState,
-    cloud_object::{
-        model::persistence::CloudModel, CloudObjectEventEntrypoint, ObjectType, Owner, Space,
-    },
-    pricing::PricingInfoModel,
-    report_error,
-    server::{
-        experiments::{ServerExperiment, ServerExperiments, ServerExperimentsEvent},
-        ids::ServerId,
-        server_api::{team::TeamClient, workspace::WorkspaceClient},
-    },
-    settings::{
-        AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
-    },
-    workspaces::workspace::{
-        AiAutonomySettings, AiOverages, SandboxedAgentSettings, UsageBasedPricingSettings,
-    },
-};
+use std::sync::Arc;
+
 use anyhow::Result;
 use regex::Regex;
-use std::sync::Arc;
-use warp_core::{
-    features::FeatureFlag,
-    settings::{ChangeEventReason, Setting},
-};
+use warp_core::features::FeatureFlag;
+use warp_core::settings::{ChangeEventReason, Setting};
 use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, Tracked};
 
+use super::team::{DiscoverableTeam, MembershipRole, Team};
+#[cfg(test)]
+use super::workspace::WorkspaceMemberUsageInfo;
+use super::workspace::{
+    AdminEnablementSetting, CustomerType, EnterpriseSecretRegex, HostEnablementSetting,
+    UgcCollectionEnablementSetting, Workspace, WorkspaceUid,
+};
+use crate::ai::llms::LLMModelHost;
+use crate::auth::{AuthStateProvider, UserUid};
+use crate::channel::ChannelState;
+use crate::cloud_object::model::persistence::CloudModel;
+use crate::cloud_object::{CloudObjectEventEntrypoint, ObjectType, Owner, Space};
+use crate::pricing::PricingInfoModel;
+use crate::report_error;
+use crate::server::experiments::{ServerExperiment, ServerExperiments, ServerExperimentsEvent};
+use crate::server::ids::ServerId;
+use crate::server::server_api::team::TeamClient;
+use crate::server::server_api::workspace::WorkspaceClient;
 #[cfg(test)]
 use crate::server::server_api::{team::MockTeamClient, workspace::MockWorkspaceClient};
-
+use crate::settings::{
+    AISettings, AISettingsChangedEvent, CodeSettings, CodeSettingsChangedEvent, PrivacySettings,
+};
 #[cfg(test)]
 use crate::workspaces::workspace::{
     AIAutonomyPolicy, BillingMetadata, WorkspaceMember, WorkspaceSettings,
 };
-
-#[cfg(test)]
-use super::workspace::WorkspaceMemberUsageInfo;
+use crate::workspaces::workspace::{
+    AiAutonomySettings, AiOverages, SandboxedAgentSettings, UsageBasedPricingSettings,
+};
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
 
@@ -561,6 +552,63 @@ impl UserWorkspaces {
             HostEnablementSetting::Enforce => true,
             HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
                 .aws_bedrock_credentials_enabled
+                .value(),
+        }
+    }
+
+    pub fn gemini_enterprise_host_settings(&self) -> Option<&super::workspace::LlmHostSettings> {
+        self.current_workspace().and_then(|workspace| {
+            workspace
+                .settings
+                .llm_settings
+                .host_configs
+                .get(&LLMModelHost::GeminiEnterprise)
+        })
+    }
+
+    /// Did the admin enable Gemini Enterprise (GEAP) for the current workspace?
+    pub fn is_gemini_enterprise_available_from_workspace(&self) -> bool {
+        self.current_workspace().is_some_and(|workspace| {
+            workspace.settings.llm_settings.enabled
+                && self
+                    .gemini_enterprise_host_settings()
+                    .is_some_and(|settings| settings.enabled)
+        })
+    }
+
+    pub fn gemini_enterprise_host_enablement_setting(&self) -> HostEnablementSetting {
+        self.gemini_enterprise_host_settings()
+            .map(|settings| settings.enablement_setting.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_gemini_enterprise_credentials_toggleable(&self) -> bool {
+        matches!(
+            self.gemini_enterprise_host_enablement_setting(),
+            HostEnablementSetting::RespectUserSetting
+        )
+    }
+
+    /// Whether Gemini Enterprise (GEAP) credentials should be minted and attached for the
+    /// current user. Anonymous/logged-out guard from [`Self::is_byo_api_key_enabled`]:
+    /// a GEAP credential mint is rooted in the user's Warp session, so without one
+    /// there is nothing to mint from.
+    pub fn is_gemini_enterprise_credentials_enabled(&self, app: &AppContext) -> bool {
+        if AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out()
+        {
+            return false;
+        }
+        // i.e. did the admin toggle on Gemini Enterprise in the admin panel?
+        if !self.is_gemini_enterprise_available_from_workspace() {
+            return false;
+        }
+
+        match self.gemini_enterprise_host_enablement_setting() {
+            HostEnablementSetting::Enforce => true,
+            HostEnablementSetting::RespectUserSetting => *AISettings::as_ref(app)
+                .gemini_enterprise_credentials_enabled
                 .value(),
         }
     }

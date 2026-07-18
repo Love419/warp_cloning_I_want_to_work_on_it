@@ -1,9 +1,9 @@
-use crate::ai::blocklist::task_status_sync_model::classify_renderable_error;
-use crate::server::server_api::ai::TaskStatusUpdate;
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 
 use super::terminal::ShareSessionError;
-use super::AgentDriverError;
+use super::{format_mcp_startup_failure_details, AgentDriverError};
+use crate::ai::blocklist::local_agent_task_sync_model::classify_renderable_error;
+use crate::server::server_api::ai::TaskStatusUpdate;
 
 /// Classify an `AgentDriverError` into a task state and a `TaskStatusUpdate`
 /// suitable for reporting via `update_agent_task`.
@@ -25,9 +25,15 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
             ),
         ),
         AgentDriverError::ShareSessionFailed { error: share_err } => {
+            let bin = warp_cli::binary_name().unwrap_or_else(|| "warp".to_string());
             let message = match share_err {
                 ShareSessionError::Internal(_) => {
                     "Failed to share agent session due to an internal error. Please try running your task again.".to_string()
+                }
+                ShareSessionError::Failed(reason) if share_err.is_authentication_required() => {
+                    format!(
+                        "Failed to share agent session because Warp authentication is missing or expired. Log in via '{bin} login', provide an API key via '--api-key', or set the WARP_API_KEY environment variable."
+                    )
                 }
                 ShareSessionError::Failed(reason) => {
                     // The reason string comes from the session-sharing layer and is aimed at
@@ -58,6 +64,9 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
                     message,
                     match share_err {
                         ShareSessionError::Disabled => PlatformErrorCode::FeatureNotAvailable,
+                        _ if share_err.is_authentication_required() => {
+                            PlatformErrorCode::AuthenticationRequired
+                        }
                         _ => PlatformErrorCode::InternalError,
                     },
                 ),
@@ -100,13 +109,34 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),
         ),
-        AgentDriverError::MCPStartupFailed => (
+        AgentDriverError::MCPStartupFailed { details, .. } => (
             AgentTaskState::Failed,
             TaskStatusUpdate::with_error_code(
-                "One or more MCP servers failed to start. Check that your MCP server configuration is valid and the server process is runnable.",
+                format!(
+                    "One or more MCP servers failed to start. Failed servers: {}. \
+                     MCP logs are not included because they may contain sensitive data. \
+                     Check the named server configuration, command/URL, required environment variables or secrets, and whether the command is available in the cloud agent environment.",
+                    format_mcp_startup_failure_details(details)
+                ),
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),
         ),
+        AgentDriverError::MCPStartupFailed { details } => {
+            let server_lines = details
+                .iter()
+                .map(|detail| format!("- {detail}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                AgentTaskState::Failed,
+                TaskStatusUpdate::with_error_code(
+                    format!(
+                        "One or more MCP servers failed to start:\n\n{server_lines}\n\nCheck that each server's configuration is valid and that it is reachable from the agent's environment."
+                    ),
+                    PlatformErrorCode::EnvironmentSetupFailed,
+                ),
+            )
+        }
         AgentDriverError::MCPJsonParseError(msg) => (
             AgentTaskState::Failed,
             TaskStatusUpdate::with_error_code(
@@ -171,7 +201,7 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
         // --- Conversation errors ---
         // Delegate to classify_renderable_error for proper ERROR vs FAILED
         // distinction and PlatformErrorCode. This is a belt-and-suspenders
-        // fallback — TaskStatusSyncModel handles most conversation errors,
+        // fallback — LocalAgentTaskSyncModel handles most conversation errors,
         // but the driver catches them too if the conversation ends with an error.
         AgentDriverError::ConversationError { error } => {
             let (state, update) = classify_renderable_error(error);

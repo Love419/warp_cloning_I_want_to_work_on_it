@@ -1,5 +1,19 @@
+use std::path::{Path, PathBuf};
+
+use warp_util::local_or_remote_path::LocalOrRemotePath;
+
 mod telemetry;
 pub use telemetry::{SkillOpenOrigin, SkillTelemetryEvent};
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+mod remote;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+pub(crate) use remote::{bundled_skills_snapshot_protos, wire_remote_bundled_skills};
+#[cfg(feature = "local_fs")]
+mod bundled;
+#[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+pub(crate) use bundled::BundledSkill;
+#[cfg(all(feature = "local_fs", test))]
+pub use bundled::BundledSkillActivation;
 
 cfg_if::cfg_if! {
     if #[cfg(not(feature = "local_fs"))] {
@@ -21,8 +35,29 @@ pub use listed_skill::SkillDescriptor;
 mod skill_utils;
 pub use skill_utils::{
     icon_override_for_skill_name, list_skills_if_changed, render_skill_button,
-    skill_path_from_file_path,
+    skill_path_from_location,
 };
+pub trait SkillPathQuery {
+    fn to_skill_location(&self) -> LocalOrRemotePath;
+}
+
+impl SkillPathQuery for LocalOrRemotePath {
+    fn to_skill_location(&self) -> LocalOrRemotePath {
+        self.clone()
+    }
+}
+
+impl SkillPathQuery for Path {
+    fn to_skill_location(&self) -> LocalOrRemotePath {
+        LocalOrRemotePath::Local(self.to_path_buf())
+    }
+}
+
+impl SkillPathQuery for PathBuf {
+    fn to_skill_location(&self) -> LocalOrRemotePath {
+        LocalOrRemotePath::Local(self.clone())
+    }
+}
 
 #[cfg(not(target_family = "wasm"))]
 mod resolve_skill_spec;
@@ -37,7 +72,5 @@ cfg_if::cfg_if! {
         pub use skill_manager::{
             read_skills_from_directories, SkillManager, SkillWatcher,
         };
-        #[cfg(test)]
-        pub use skill_manager::BundledSkillActivation;
     }
 }

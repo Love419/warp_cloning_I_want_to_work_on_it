@@ -1,39 +1,19 @@
 #![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 // Adding this file level gate as some of the code around editability is not used in WASM yet.
 
-use crate::code::editor::line_iterator::LineIterator;
-use crate::code_review::CodeReviewTelemetryEvent;
-use num_traits::SaturatingSub;
-use rangemap::{RangeMap, RangeSet};
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{cmp, mem};
-use warp_core::platform::SessionPlatform;
-use warp_core::send_telemetry_from_ctx;
-use warp_core::ui::theme::Fill;
-use warp_editor::content::anchor::Anchor;
-use warp_editor::content::edit::EditDelta;
-use warp_editor::content::find::{SearchConfig, SearchResults};
-use warp_editor::content::selection_model::BufferSelectionModel;
-use warp_editor::content::version::BufferVersion;
-use warp_editor::multiline::{AnyMultilineString, MultilineString, LF};
-use warp_editor::render::model::{AutoScrollMode, LineCount, StyleUpdateAction};
-use warp_editor::selection::TextDirection;
-use warpui::units::{IntoPixels, Pixels};
-
-use crate::util::link_detection::get_word_range_at_offset;
-use crate::{
-    appearance::Appearance, editor::InteractionState, notebooks::editor::model::word_unit,
-    themes::theme::AnsiColorIdentifier,
-};
 
 use ai::diff_validation::DiffDelta;
 use itertools::Itertools;
 use languages::{language_by_filename, language_by_local_filename, language_by_name, Language};
 use line_ending::LineEnding;
+use num_traits::SaturatingSub;
+use rangemap::{RangeMap, RangeSet};
 use string_offset::CharOffset;
 use syntax_tree::{ColorMap, DecorationStateEvent, SyntaxTreeState};
 use vec1::{vec1, Vec1};
@@ -47,32 +27,39 @@ use vim::{
     vim_a_quote, vim_a_word, vim_find_char_on_line, vim_find_matching_bracket, vim_inner_block,
     vim_inner_paragraph, vim_inner_quote, vim_inner_word, vim_word_iterator_from_offset,
 };
+use warp_core::platform::SessionPlatform;
 use warp_core::semantic_selection::SemanticSelection;
-use warp_editor::content::buffer::{ShouldAutoscroll, VimInsertPoint};
-use warp_editor::{
-    content::{
-        buffer::{
-            AutoScrollBehavior, Buffer, BufferEditAction, BufferEvent, BufferSelectAction,
-            EditOrigin, InitialBufferState, SelectionOffsets, ToBufferCharOffset, ToBufferPoint,
-        },
-        hidden_lines_model::HiddenLinesModel,
-        text::{BufferBlockStyle, IndentBehavior, IndentUnit},
-    },
-    decoration::DecorationLayer,
-    editor::TextDecoration,
-    model::{CoreEditorModel, PlainTextEditorModel},
-    render::model::{
-        BlockItem, Decoration, LineDecoration, RenderEvent, RenderLineLocation, RenderState,
-        RichTextStyles, UpdateDecorationAfterLayout, WidthSetting,
-    },
-    selection::{SelectionMode, SelectionModel, TextUnit},
+use warp_core::ui::theme::Fill;
+use warp_editor::content::anchor::Anchor;
+use warp_editor::content::buffer::{
+    AutoScrollBehavior, Buffer, BufferEditAction, BufferEvent, BufferSelectAction, EditOrigin,
+    InitialBufferState, SelectionOffsets, ShouldAutoscroll, ToBufferCharOffset, ToBufferPoint,
+    VimInsertPoint,
 };
+use warp_editor::content::edit::EditDelta;
+use warp_editor::content::find::{SearchConfig, SearchResults};
+use warp_editor::content::hidden_lines_model::HiddenLinesModel;
+use warp_editor::content::selection_model::BufferSelectionModel;
+use warp_editor::content::text::{BufferBlockStyle, IndentBehavior, IndentUnit};
+use warp_editor::content::version::BufferVersion;
+use warp_editor::decoration::DecorationLayer;
+use warp_editor::editor::TextDecoration;
+use warp_editor::model::{CoreEditorModel, PlainTextEditorModel};
+use warp_editor::multiline::{AnyMultilineString, MultilineString, LF};
+use warp_editor::render::model::{
+    AutoScrollMode, BlockItem, CommentBlock, Decoration, LineCount, LineDecoration, RenderEvent,
+    RenderLineLocation, RenderState, RichTextStyles, StyleUpdateAction,
+    UpdateDecorationAfterLayout, WidthSetting,
+};
+use warp_editor::selection::{SelectionMode, SelectionModel, TextDirection, TextUnit};
 use warp_util::standardized_path::StandardizedPath;
 use warpui::elements::{
     AnchorPair, OffsetPositioning, OffsetType, PositionedElementOffsetBounds, PositioningAxis,
     XAxisAnchor, YAxisAnchor,
 };
-use warpui::text::{point::Point, TextBuffer};
+use warpui::text::point::Point;
+use warpui::text::TextBuffer;
+use warpui::units::{IntoPixels, Pixels};
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::super::DiffResult;
@@ -81,7 +68,13 @@ use super::diff::{
     add_inline_overlay_color, DiffModel, DiffModelEvent, DiffStatus, RenderableDiffHunk,
 };
 use super::line::EditorLineLocation;
+use crate::appearance::Appearance;
+use crate::code::editor::line_iterator::LineIterator;
 use crate::code_review::comments::{CommentId, CommentOrigin, LineDiffContent};
+use crate::editor::InteractionState;
+use crate::notebooks::editor::model::word_unit;
+use crate::themes::theme::AnsiColorIdentifier;
+use crate::util::link_detection::get_word_range_at_offset;
 
 /// An opaque handle to a stable line in the editor content, suitable for scroll
 /// position preservation. Contains an internal anchor that tracks through
@@ -849,6 +842,7 @@ impl CodeEditorModel {
                 | BlockItem::OrderedList { .. }
                 | BlockItem::Header { .. }
                 | BlockItem::Embedded(_)
+                | BlockItem::EmbeddedComment { .. }
                 | BlockItem::HorizontalRule(_)
                 | BlockItem::Image { .. }
                 | BlockItem::Table(_)
@@ -3831,9 +3825,6 @@ impl CoreEditorModel for CodeEditorModel {
 
 impl CodeEditorModel {
     pub fn open_comment_line(&mut self, line: &EditorLineLocation, ctx: &mut ModelContext<Self>) {
-        // Telemetry: comment editor opened for a new inline review comment.
-        send_telemetry_from_ctx!(CodeReviewTelemetryEvent::CommentEditorOpened, ctx);
-
         self.comments.update(ctx, |comments, ctx| {
             comments.pending_comment = PendingComment::Open { line: line.clone() };
             ctx.emit(PendingCommentEvent::NewPendingComment(line.clone()));
@@ -3848,9 +3839,6 @@ impl CodeEditorModel {
         origin: &CommentOrigin,
         ctx: &mut ModelContext<Self>,
     ) {
-        // Telemetry: comment editor opened for editing an existing inline review comment.
-        send_telemetry_from_ctx!(CodeReviewTelemetryEvent::CommentEditorOpened, ctx);
-
         self.comments.update(ctx, |comments, ctx| {
             comments.pending_comment = PendingComment::Open { line: line.clone() };
             ctx.emit(PendingCommentEvent::ReopenPendingComment {
@@ -3859,6 +3847,20 @@ impl CodeEditorModel {
                 comment_text: comment_text.to_owned(),
                 origin: origin.to_owned(),
             });
+        });
+    }
+
+    /// Replace the full set of per-view inline comment blocks on this view's [`RenderState`] with
+    /// `blocks` (the saved-comment cards plus, when open, the active composer). An empty vector
+    /// removes all inline comment blocks. This lives on the per-view render state only (never the
+    /// shared buffer), so it cannot leak into other views of the same file.
+    pub fn set_inline_comment_blocks(
+        &mut self,
+        blocks: Vec<CommentBlock>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.render_state.update(ctx, |render_state, _| {
+            render_state.set_comment_blocks(blocks)
         });
     }
 }

@@ -1,53 +1,43 @@
-use std::{
-    collections::HashMap,
-    ffi::OsString,
-    future::Future,
-    path::PathBuf,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::channel::oneshot;
+use futures::TryFutureExt as _;
 use session_sharing_protocol::common::{Role, SessionId};
-use session_sharing_protocol::sharer::SessionSourceType;
+use session_sharing_protocol::sharer::SessionRetentionReason;
+use tracing::Instrument as _;
 use warp_cli::share::{ShareAccessLevel, ShareRequest, ShareSubject};
 use warp_completer::completer::CommandOutput;
 use warp_core::command::ExitCode;
 use warp_core::features::FeatureFlag;
-use warp_util::{path::ShellFamily, sync::Condition};
-use warpui::{
-    r#async::FutureExt, AppContext, Entity, ModelContext, ModelHandle, SingletonEntity as _,
-    ViewHandle,
-};
-
-use crate::terminal::model::session::ExecuteCommandOptions;
 use warp_terminal::model::grid::Dimensions;
-
-use crate::{
-    ai::ambient_agents::AmbientAgentTaskId,
-    pane_group::NewTerminalOptions,
-    root_view::{open_new_with_workspace_source, NewWorkspaceSource},
-    terminal::{
-        model::{
-            block::{BlockId, SerializedBlock},
-            find::RegexDFAs,
-            grid::RespectDisplayedOutput,
-            index::Point,
-            RespectObfuscatedSecrets,
-        },
-        shared_session::{self, IsSharedSessionCreator},
-        shell::ShellType,
-        view::ConversationRestorationInNewPaneType,
-        TerminalView,
-    },
-    workspaces::user_workspaces::UserWorkspaces,
-};
-
-use crate::ai::attachment_utils::attachments_download_dir;
+use warp_util::path::ShellFamily;
+use warp_util::sync::Condition;
+use warpui::r#async::FutureExt;
+use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity as _, ViewHandle};
 
 use super::AgentDriverError;
+use crate::ai::ambient_agents::AmbientAgentTaskId;
+use crate::ai::attachment_utils::attachments_download_dir;
+use crate::pane_group::NewTerminalOptions;
+use crate::root_view::{open_new_with_workspace_source, NewWorkspaceSource};
+use crate::terminal::model::block::{BlockId, SerializedBlock};
+use crate::terminal::model::find::RegexDFAs;
+use crate::terminal::model::grid::RespectDisplayedOutput;
+use crate::terminal::model::index::Point;
+use crate::terminal::model::session::ExecuteCommandOptions;
+use crate::terminal::model::RespectObfuscatedSecrets;
+use crate::terminal::shared_session::{self, IsSharedSessionCreator, SharedSessionSource};
+use crate::terminal::shell::ShellType;
+use crate::terminal::view::{ConversationRestorationInNewPaneType, Event};
+use crate::terminal::TerminalView;
+use crate::workspaces::user_workspaces::UserWorkspaces;
 
 /// Describes why an agent's session-sharing request failed.
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +61,17 @@ pub(crate) enum ShareSessionError {
     Interrupted,
 }
 
+pub(super) const LOGIN_REQUIRED_SHARE_SESSION_REASON: &str =
+    "You must be logged in to share sessions.";
 const TERMINAL_SESSION_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
-const TERMINAL_SESSION_SHARE_DELAY: Duration = Duration::from_secs(10);
+/// The total time to wait for session sharing to start, including retries.
+const TERMINAL_SESSION_SHARE_DELAY: Duration = Duration::from_secs(20);
+
+impl ShareSessionError {
+    pub(super) fn is_authentication_required(&self) -> bool {
+        matches!(self, Self::Failed(reason) if reason == LOGIN_REQUIRED_SHARE_SESSION_REASON)
+    }
+}
 
 /// Options for creating the terminal view before constructing a [`TerminalDriver`].
 pub(crate) struct TerminalDriverOptions {
@@ -132,9 +131,7 @@ fn create_terminal_view(
 ) -> Result<ViewHandle<TerminalView>, AgentDriverError> {
     let is_shared_session_creator = if options.should_share {
         IsSharedSessionCreator::Yes {
-            source_type: SessionSourceType::AmbientAgent {
-                task_id: options.task_id.map(|t| t.to_string()),
-            },
+            source: SharedSessionSource::ambient_agent(options.task_id.map(|t| t.to_string())),
         }
     } else {
         IsSharedSessionCreator::No
@@ -560,11 +557,17 @@ impl TerminalDriver {
             session_bootstrapped
                 .wait()
                 .with_timeout(TERMINAL_SESSION_BOOTSTRAP_TIMEOUT)
-                .await
-                .map_err(|_| {
+                .map_err(|err| {
                     log::error!("Timed out waiting for session bootstrap");
+                    tracing::error!(error = %err);
+
                     AgentDriverError::BootstrapFailed
                 })
+                .instrument(tracing::info_span!(
+                    "wait_for_session_bootstrapped",
+                    tags.cloud_agent = true
+                ))
+                .await
         }
     }
 
@@ -607,6 +610,29 @@ impl TerminalDriver {
                 }
             }
         }
+    }
+
+    pub fn extend_shared_session_retention(
+        &mut self,
+        reason: SessionRetentionReason,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.terminal_view.update(ctx, |terminal, ctx| {
+            if !terminal
+                .model
+                .lock()
+                .shared_session_status()
+                .is_active_sharer()
+            {
+                log::warn!(
+                    "Tried to extend shared session retention before sharing was active: {reason:?}"
+                );
+                return;
+            }
+
+            log::info!("Emitting request to extend shared session retention: {reason:?}");
+            ctx.emit(Event::ExtendSessionRetention { reason });
+        });
     }
 }
 
@@ -722,3 +748,7 @@ impl TerminalDriver {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_tests.rs"]
+mod tests;

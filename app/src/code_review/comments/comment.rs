@@ -1,22 +1,22 @@
-use crate::{
-    ai::agent::{CurrentHead, DiffBase},
-    code::{
-        buffer_location::LocalOrRemotePath,
-        editor::{line::EditorLineLocation, EditorReviewComment},
-    },
-};
-use chrono::{DateTime, Local};
 use std::fmt::{Display, Formatter};
+
+use chrono::{DateTime, Local};
 use warp_editor::render::model::LineCount;
 use warp_multi_agent_api::{self as api};
+
+use crate::ai::agent::{CurrentHead, DiffBase};
+use crate::code::buffer_location::LocalOrRemotePath;
+use crate::code::editor::line::EditorLineLocation;
+use crate::code::editor::EditorReviewComment;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CommentOrigin {
     /// Comments originally created in the Warp UI.
     #[default]
     Native,
-    /// Comments imported from a GitHub pull request.
-    ImportedFromGitHub(ImportedCommentDetails),
+    /// Comments imported from a GitHub pull request. Boxed to keep `CommentOrigin` (and the
+    /// `EditorReviewComment` that carries it through the editor's saved-comment events) small.
+    ImportedFromGitHub(Box<ImportedCommentDetails>),
 }
 
 impl CommentOrigin {
@@ -215,7 +215,7 @@ impl AttachedReviewComment {
             },
             last_update_time: comment.last_update_time,
             outdated: false,
-            origin: CommentOrigin::Native,
+            origin: comment.origin,
         }
     }
 

@@ -1,31 +1,25 @@
-use super::{
-    common::{
-        add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
-        add_workflow_info_overlay, should_show_terminal_input_message_bar,
-        wrap_input_with_terminal_padding_and_focus_handler,
-    },
-    Input, InputAction, InputDropTargetData,
-};
-
-use crate::{
-    appearance::Appearance,
-    context_chips::spacing,
-    features::FeatureFlag,
-    settings::{AppEditorSettings, InputModeSettings},
-    terminal::{
-        block_list_settings::BlockListSettings, block_list_viewport::InputMode,
-        settings::TerminalSettings, view::TerminalAction,
-    },
-};
 use warp_core::settings::Setting;
-use warpui::{
-    elements::{
-        Border, Clipped, Container, DropTarget, Element, Flex, Hoverable, ParentElement,
-        SavePosition, Stack,
-    },
-    presenter::ChildView,
-    AppContext, SingletonEntity,
+use warpui::elements::{
+    Border, Clipped, Container, DropTarget, Element, Flex, Hoverable, ParentElement, SavePosition,
+    Stack,
 };
+use warpui::presenter::ChildView;
+use warpui::{AppContext, SingletonEntity};
+
+use super::common::{
+    add_command_xray_overlay, add_input_suggestions_overlays, add_voltron_overlay,
+    add_workflow_info_overlay, should_show_terminal_input_message_bar,
+    wrap_input_with_terminal_padding_and_focus_handler,
+};
+use super::{Input, InputAction, InputDropTargetData};
+use crate::appearance::Appearance;
+use crate::context_chips::spacing;
+use crate::features::FeatureFlag;
+use crate::settings::{AppEditorSettings, InputModeSettings};
+use crate::terminal::block_list_settings::BlockListSettings;
+use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::settings::TerminalSettings;
+use crate::terminal::view::TerminalAction;
 
 impl Input {
     /// Renders the terminal mode input when `FeatureFlag::AgentView` is enabled and there is no
@@ -48,7 +42,7 @@ impl Input {
         let mut column = Flex::column();
 
         if matches!(input_mode, InputMode::PinnedToBottom | InputMode::Waterfall) {
-            if let Some(banner) = self.render_input_banner(appearance, app, input_mode, false) {
+            if let Some(banner) = self.render_input_banner(app, input_mode, false) {
                 column.add_child(
                     Container::new(banner)
                         .with_margin_top(spacing::UDI_CHIP_MARGIN)
@@ -92,7 +86,7 @@ impl Input {
         }
 
         if matches!(input_mode, InputMode::PinnedToTop) {
-            if let Some(banner) = self.render_input_banner(appearance, app, input_mode, false) {
+            if let Some(banner) = self.render_input_banner(app, input_mode, false) {
                 column.add_child(
                     Container::new(banner)
                         .with_margin_bottom(spacing::UDI_CHIP_MARGIN)

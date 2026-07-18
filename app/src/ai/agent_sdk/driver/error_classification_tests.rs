@@ -2,6 +2,10 @@ use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 
 use super::classify_driver_error;
 use crate::ai::agent_sdk::driver::terminal::ShareSessionError;
+use crate::ai::agent_sdk::driver::{AgentDriverError, MCPStartupFailureDetail};
+use crate::ai::agent_sdk::driver::terminal::{
+    ShareSessionError, LOGIN_REQUIRED_SHARE_SESSION_REASON,
+};
 use crate::ai::agent_sdk::driver::AgentDriverError;
 
 fn assert_state_and_code(
@@ -70,6 +74,62 @@ fn mcp_server_not_found_is_failed_with_env_setup() {
         AgentTaskState::Failed,
         Some(PlatformErrorCode::EnvironmentSetupFailed),
     );
+}
+#[test]
+fn mcp_startup_failed_includes_safe_server_details() {
+    let error = AgentDriverError::MCPStartupFailed {
+        summary: "github (the configured MCP command could not be found in the agent environment), notion (startup timed out before the server completed MCP initialization)".to_string(),
+        details: vec![
+            MCPStartupFailureDetail::new(
+                "github".to_string(),
+                "the configured MCP command could not be found in the agent environment"
+                    .to_string(),
+            ),
+            MCPStartupFailureDetail::new(
+                "notion".to_string(),
+                "startup timed out before the server completed MCP initialization".to_string(),
+            ),
+        ],
+    };
+    let display_message = error.to_string();
+    assert!(display_message.contains("github"));
+    assert!(display_message.contains("notion"));
+    assert!(display_message.contains("command could not be found"));
+
+    let (state, update) = classify_driver_error(&error);
+
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::EnvironmentSetupFailed)
+    );
+    assert!(update.message.contains("github"));
+    assert!(update.message.contains("notion"));
+    assert!(update.message.contains("command could not be found"));
+    assert!(update.message.contains("timed out"));
+    assert!(update.message.contains("MCP logs are not included"));
+}
+
+#[test]
+fn mcp_startup_failed_is_failed_with_env_setup_and_per_server_details() {
+    let (state, update) = classify_driver_error(&AgentDriverError::MCPStartupFailed {
+        details: vec![
+            "'devin' failed to start: connection refused".to_string(),
+            "'datadog' did not start within 20s".to_string(),
+        ],
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::EnvironmentSetupFailed)
+    );
+    // Each unavailable server is rendered as its own bullet line.
+    assert!(update
+        .message
+        .contains("- 'devin' failed to start: connection refused"));
+    assert!(update
+        .message
+        .contains("- 'datadog' did not start within 20s"));
 }
 
 #[test]
@@ -161,6 +221,20 @@ fn share_session_failed_includes_reason() {
     });
     assert_eq!(state, AgentTaskState::Error);
     assert!(update.message.contains("server rejected"));
+}
+
+#[test]
+fn share_session_login_required_gets_auth_required() {
+    let (state, update) = classify_driver_error(&AgentDriverError::ShareSessionFailed {
+        error: ShareSessionError::Failed(LOGIN_REQUIRED_SHARE_SESSION_REASON.into()),
+    });
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::AuthenticationRequired)
+    );
+    assert!(update.message.contains("Warp authentication"));
+    assert!(update.message.contains("WARP_API_KEY"));
 }
 
 // --- Conversation-level outcomes ---

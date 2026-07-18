@@ -1,20 +1,53 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use dunce::canonicalize;
+use itertools::Itertools;
+use pathfinder_color::ColorU;
+use warp_core::features::FeatureFlag;
+use warp_core::ui::Icon;
+use warp_util::path::LineAndColumnArg;
+use warpui::elements::{
+    resizable_state_handle, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container,
+    CrossAxisAlignment, DragBarSide, Element, Empty, Flex, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, ParentElement, PositionedElementAnchor, Resizable, ResizableStateHandle,
+    Shrinkable, Text,
+};
+use warpui::fonts::{Properties, Weight};
+use warpui::keymap::EditableBinding;
+use warpui::platform::Cursor;
+use warpui::ui_components::components::UiComponent;
+use warpui::{
+    AppContext, Entity, EntityId, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
+    ViewHandle, WeakViewHandle,
+};
+
 use crate::ai::agent::AgentReviewCommentBatch;
+use crate::appearance::{Appearance, AppearanceEvent};
+use crate::code::buffer_location::LocalOrRemotePath;
 use crate::code_review::code_review_header::HEADER_BUTTON_PADDING;
 #[cfg(feature = "local_fs")]
 use crate::code_review::code_review_view::CodeReviewAction;
 use crate::code_review::code_review_view::{
-    render_file_navigation_button, CodeReviewView, CONTENT_LEFT_MARGIN, CONTENT_RIGHT_MARGIN,
+    render_file_navigation_button, CodeReviewCommentDebugState, CodeReviewView,
+    CodeReviewViewEvent, ReviewActionTargetProvider, CONTENT_LEFT_MARGIN, CONTENT_RIGHT_MARGIN,
 };
-use crate::code_review::code_review_view::{CodeReviewCommentDebugState, CodeReviewViewEvent};
+use crate::code_review::diff_state::DiffStateModel;
 use crate::code_review::telemetry_event::CodeReviewContextDestination;
-use crate::pane_group::pane::view::header::{components::HEADER_EDGE_PADDING, PANE_HEADER_HEIGHT};
-use crate::pane_group::WorkingDirectoriesEvent;
-use crate::pane_group::{Event as PaneGroupEvent, PaneGroup, WorkingDirectoriesModel};
+use crate::drive::panel::{MAX_SIDEBAR_WIDTH_RATIO, MIN_SIDEBAR_WIDTH};
+use crate::pane_group::pane::view::header::components::HEADER_EDGE_PADDING;
+use crate::pane_group::pane::view::header::PANE_HEADER_HEIGHT;
+use crate::pane_group::{
+    Event as PaneGroupEvent, PaneGroup, WorkingDirectoriesEvent, WorkingDirectoriesModel,
+};
 use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::terminal::cli_agent_sessions::CLIAgentSessionsModel;
 use crate::terminal::input::MenuPositioning;
+use crate::terminal::resizable_data::{ModalType, ResizableData};
+use crate::terminal::view::TerminalView;
 use crate::terminal::CLIAgent;
-use crate::ui_components::{buttons::icon_button_with_color, icons};
+use crate::ui_components::buttons::icon_button_with_color;
+use crate::ui_components::icons;
 use crate::util::bindings::{keybinding_name_to_display_string, CustomAction};
 #[cfg(feature = "local_fs")]
 use crate::util::openable_file_type::FileTarget;
@@ -25,45 +58,6 @@ use crate::view_components::action_button::{NakedTheme, TooltipAlignment};
 use crate::view_components::{Dropdown, DropdownItem};
 use crate::workspace::view::TOGGLE_RIGHT_PANEL_BINDING_NAME;
 use crate::workspace::WorkspaceAction;
-use crate::{
-    appearance::{Appearance, AppearanceEvent},
-    drive::panel::{MAX_SIDEBAR_WIDTH_RATIO, MIN_SIDEBAR_WIDTH},
-    terminal::resizable_data::{ModalType, ResizableData},
-};
-use crate::{
-    code::buffer_location::LocalOrRemotePath, code_review::diff_state::DiffStateModel,
-    terminal::view::TerminalView,
-};
-use dunce::canonicalize;
-use itertools::Itertools;
-use pathfinder_color::ColorU;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-use warp_core::features::FeatureFlag;
-use warp_core::ui::Icon;
-use warp_util::path::LineAndColumnArg;
-use warpui::elements::{ChildAnchor, Empty, PositionedElementAnchor};
-use warpui::keymap::EditableBinding;
-use warpui::EntityId;
-use warpui::{
-    elements::{
-        resizable_state_handle, Container, DragBarSide, Element, MainAxisSize, MouseStateHandle,
-        Resizable, ResizableStateHandle,
-    },
-    AppContext, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
-    ViewHandle, WeakViewHandle,
-};
-use warpui::{
-    elements::{
-        ChildView, Clipped, ConstrainedBox, CrossAxisAlignment, Flex, MainAxisAlignment,
-        ParentElement, Shrinkable, Text,
-    },
-    fonts::{Properties, Weight},
-    platform::Cursor,
-    ui_components::components::UiComponent,
-};
 
 /// Describes which agent destination is available for sending review comments.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +115,64 @@ struct ReviewTerminalStatus {
 impl ReviewTerminalStatus {
     fn is_available(&self) -> bool {
         self.unavailable_reasons.is_empty()
+    }
+}
+
+/// `ReviewActionTargetProvider` backed by the right panel's active pane group,
+/// so code review actions resolve their target terminal at action time instead
+/// of using a handle captured when the review view was created.
+struct RightPanelReviewActionTargetProvider {
+    right_panel: WeakViewHandle<RightPanelView>,
+}
+
+impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
+    fn attach_terminal(
+        &self,
+        repo_path: &LocalOrRemotePath,
+        app: &AppContext,
+    ) -> Option<ViewHandle<TerminalView>> {
+        let right_panel = self.right_panel.upgrade(app)?;
+        right_panel.read(app, |panel, app| {
+            let pane_group = panel.active_pane_group.as_ref()?;
+            let ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
+            panel
+                .find_review_terminal(pane_group, repo_path, ai_enabled, app)
+                .or_else(|| {
+                    // No terminal is available (e.g. all candidates are
+                    // executing). Fall back to the focused terminal when it is
+                    // inside the repo, so per-action handling for busy
+                    // terminals still targets the focused conversation.
+                    let focused = pane_group
+                        .read(app, |pane_group, app| pane_group.focused_session_view(app))?;
+                    let status = RightPanelView::review_terminal_status(
+                        &focused,
+                        Some(repo_path),
+                        ai_enabled,
+                        app,
+                    );
+                    let in_repo = !status.unavailable_reasons.iter().any(|reason| {
+                        matches!(
+                            reason,
+                            ReviewTerminalUnavailableReason::NoSelectedRepo
+                                | ReviewTerminalUnavailableReason::SessionPathUnavailable
+                                | ReviewTerminalUnavailableReason::SessionOutsideSelectedRepo
+                        )
+                    });
+                    in_repo.then_some(focused)
+                })
+        })
+    }
+
+    fn focused_terminal(&self, app: &AppContext) -> Option<ViewHandle<TerminalView>> {
+        let right_panel = self.right_panel.upgrade(app)?;
+        right_panel.read(app, |panel, app| {
+            let pane_group = panel.active_pane_group.as_ref()?;
+            pane_group.read(app, |pane_group, app| {
+                pane_group
+                    .focused_session_view(app)
+                    .or_else(|| pane_group.active_session_view(app))
+            })
+        })
     }
 }
 
@@ -336,7 +388,7 @@ impl CodeReviewState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
 pub enum RightPanelAction {
     ToggleFileSidebar,
@@ -656,7 +708,6 @@ impl RightPanelView {
         &mut self,
         repo_path: Option<LocalOrRemotePath>,
         diff_state_model: ModelHandle<DiffStateModel>,
-        terminal_view: WeakViewHandle<TerminalView>,
         ctx: &mut ViewContext<Self>,
     ) {
         let Some(repo_dropdown_state) = &mut self.code_review_state else {
@@ -681,17 +732,12 @@ impl RightPanelView {
             .get_code_review_view(pane_group_id, repo_path);
         if let Some(view) = existing_view {
             view.update(ctx, |view, ctx| {
-                view.set_terminal_view(terminal_view);
                 view.on_open(ctx);
             });
             self.recompute_terminal_availability(ctx);
-        } else if let Some(view) = self.create_code_review_view(
-            repo_path,
-            diff_state_model.clone(),
-            pane_group_id,
-            terminal_view.clone(),
-            ctx,
-        ) {
+        } else if let Some(view) =
+            self.create_code_review_view(repo_path, diff_state_model.clone(), pane_group_id, ctx)
+        {
             view.update(ctx, |view, ctx| {
                 view.on_open(ctx);
             });
@@ -1163,7 +1209,6 @@ impl RightPanelView {
         repo_path: &LocalOrRemotePath,
         diff_state_model: ModelHandle<DiffStateModel>,
         pane_group_id: EntityId,
-        terminal_view: WeakViewHandle<TerminalView>,
         ctx: &mut ViewContext<Self>,
     ) -> Option<ViewHandle<CodeReviewView>> {
         // Early check: if pane group has no active repositories, don't create a view.
@@ -1188,12 +1233,16 @@ impl RightPanelView {
                 .update(ctx, |working_directories, ctx| {
                     working_directories.get_or_create_code_review_comments(repo_path, ctx)
                 });
+        let action_target_provider: Box<dyn ReviewActionTargetProvider> =
+            Box::new(RightPanelReviewActionTargetProvider {
+                right_panel: ctx.handle(),
+            });
         let code_review_view = ctx.add_typed_action_view(|ctx| {
             CodeReviewView::new(
                 Some(repo_path.clone()),
                 diff_state_model_clone,
                 code_review_comment_batch,
-                Some(terminal_view),
+                Some(action_target_provider),
                 ctx,
             )
         });
@@ -1682,8 +1731,14 @@ impl RightPanelView {
                 });
             }
         } else {
+            // Prefer the pane group's active session so the diff request rides
+            // the connection actually showing the review; the manager falls
+            // back to any connected session for the host when unavailable.
+            let preferred_session = pane_group
+                .read(ctx, |pg, ctx| pg.active_session_view(ctx))
+                .and_then(|tv| tv.as_ref(ctx).active_block_session_id());
             let diff_state_model = self.working_directories_model.update(ctx, |model, ctx| {
-                model.get_or_create_diff_state_model(repo_path.clone(), ctx)
+                model.get_or_create_diff_state_model(repo_path.clone(), preferred_session, ctx)
             });
 
             let Some(diff_state_model) = diff_state_model else {
@@ -1695,7 +1750,10 @@ impl RightPanelView {
                 .most_recent_repositories_for_pane_group(pane_group_id)
                 .is_some_and(|mut repos| repos.any(|r| &r == repo_path));
 
-            let terminal_view = if is_known_repo {
+            // Only create a view when a terminal exists for the repo. The view
+            // resolves its target terminal lazily via `ReviewActionTargetProvider`,
+            // so this is purely a creation gate.
+            let has_review_terminal = if is_known_repo {
                 let Some(terminal_view_id) = self
                     .working_directories_model
                     .as_ref(ctx)
@@ -1704,20 +1762,19 @@ impl RightPanelView {
                     return;
                 };
                 ctx.view_with_id::<TerminalView>(ctx.window_id(), terminal_view_id)
+                    .is_some()
             } else {
                 // For repos not yet tracked (e.g. remote repos from direct open),
                 // fall back to the active session.
-                pane_group.read(ctx, |pane_group, ctx| pane_group.active_session_view(ctx))
+                pane_group
+                    .read(ctx, |pane_group, ctx| pane_group.active_session_view(ctx))
+                    .is_some()
             };
 
-            if let Some(terminal_view) = terminal_view {
-                if let Some(view) = self.create_code_review_view(
-                    repo_path,
-                    diff_state_model,
-                    pane_group_id,
-                    terminal_view.downgrade(),
-                    ctx,
-                ) {
+            if has_review_terminal {
+                if let Some(view) =
+                    self.create_code_review_view(repo_path, diff_state_model, pane_group_id, ctx)
+                {
                     if is_panel_open {
                         view.update(ctx, |view, ctx| {
                             view.on_open(ctx);

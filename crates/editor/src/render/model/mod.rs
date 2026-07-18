@@ -1,83 +1,66 @@
 use core::slice;
-use std::{
-    any::Any,
-    cell::{Cell, Ref, RefCell},
-    collections::{HashMap, HashSet},
-    fmt, mem,
-    ops::{Add, AddAssign, Range, Sub, SubAssign},
-    sync::Arc,
-};
-
-use parking_lot::Mutex;
-use rangemap::RangeSet;
+use std::any::Any;
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::ops::{Add, AddAssign, Range, Sub, SubAssign};
+use std::sync::Arc;
+use std::{fmt, mem};
 
 use float_cmp::ApproxEq;
 use itertools::Itertools;
 use markdown_parser::TableAlignment;
 use num_traits::SaturatingSub;
 use ordered_float::OrderedFloat;
+use parking_lot::Mutex;
+use rangemap::RangeSet;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Mapping;
+use string_offset::{CharOffset, impl_offset};
 use sum_tree::{SeekBias, SumTree};
 use vec1::Vec1;
 use vim::vim::{MotionType, VimMode};
-use warp_core::{
-    channel::ChannelState,
-    ui::{Icon, theme::Fill as ThemeFill},
+use warp_core::channel::ChannelState;
+use warp_core::ui::Icon;
+use warp_core::ui::theme::Fill as ThemeFill;
+use warpui_core::assets::asset_cache::AssetSource;
+use warpui_core::color::ColorU;
+use warpui_core::elements::{
+    Border, Fill, ListIndentLevel, ListNumbering, Margin, MouseStateHandle, Padding, ScrollData,
 };
-use warpui::{
-    AppContext, Entity, EntityId, ModelContext, ModelHandle,
-    assets::asset_cache::AssetSource,
-    color::ColorU,
-    elements::{Border, Fill, ListNumbering, Margin, MouseStateHandle, Padding, ScrollData},
-    fonts::{FamilyId, Properties, Weight},
-    geometry::{
-        rect::RectF,
-        vector::{Vector2F, vec2f},
-    },
-    platform::LineStyle,
-    text_layout::CaretPosition,
-    text_layout::{LayoutCache, Line, TextFrame},
-    text_selection_utils::{
-        NewlineTickParams, calculate_tick_width, create_newline_tick_rect,
-        selection_crosses_newline_offset_based,
-    },
-    units::{IntoPixels, Pixels},
+use warpui_core::fonts::{FamilyId, Properties, Weight};
+use warpui_core::geometry::rect::RectF;
+use warpui_core::geometry::vector::{Vector2F, vec2f};
+use warpui_core::platform::LineStyle;
+use warpui_core::text_layout::{CaretPosition, LayoutCache, Line, TextFrame};
+use warpui_core::text_selection_utils::{
+    NewlineTickParams, calculate_tick_width, create_newline_tick_rect,
+    selection_crosses_newline_offset_based,
 };
+use warpui_core::units::{IntoPixels, Pixels};
+use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle};
 
+use self::location::WrapDirection;
 pub use self::location::{HitTestOptions, Location};
 pub use self::offset_map::{OffsetMap, SelectableTextRun};
 pub use self::positioned::Positioned;
-use self::{
-    location::WrapDirection,
-    saved_positions::SavedPositions,
-    viewport::{ScrollPositionSnapshot, SizeInfo},
+use self::positioned::PositionedCursor;
+use self::saved_positions::SavedPositions;
+use self::viewport::{
+    ScrollPositionSnapshot, SizeInfo, ViewportItem, ViewportIterator, ViewportState,
 };
-use self::{
-    positioned::PositionedCursor,
-    viewport::{ViewportItem, ViewportIterator, ViewportState},
+use super::BLOCK_FOOTER_HEIGHT;
+use super::element::broken_embedding::RenderableBrokenEmbedding;
+use super::element::{CursorData, RenderContext, RenderableBlock};
+use super::layout::{TextLayout, line_height};
+use crate::content::edit::{
+    EditDelta, LaidOutRenderDelta, ParsedUrl, TemporaryBlock, layout_temporary_blocks,
 };
-use crate::{
-    content::{
-        edit::{EditDelta, LaidOutRenderDelta, ParsedUrl, TemporaryBlock, layout_temporary_blocks},
-        hidden_lines_model::HiddenLinesModel,
-        markdown::MarkdownStyle,
-        text::{BlockHeaderSize, BufferBlockStyle, CodeBlockType, FormattedTable},
-        version::BufferVersion,
-    },
-    editor::EmbeddedItemModel,
-    render::model::debug::Describe,
-};
-use string_offset::{CharOffset, impl_offset};
-use warpui::elements::ListIndentLevel;
-
-use super::{
-    BLOCK_FOOTER_HEIGHT,
-    element::{RenderableBlock, broken_embedding::RenderableBrokenEmbedding},
-    layout::{TextLayout, line_height},
-};
-
-use super::element::{CursorData, RenderContext};
+use crate::content::hidden_lines_model::HiddenLinesModel;
+use crate::content::markdown::MarkdownStyle;
+use crate::content::text::{BlockHeaderSize, BufferBlockStyle, CodeBlockType, FormattedTable};
+use crate::content::version::BufferVersion;
+use crate::editor::EmbeddedItemModel;
+use crate::render::model::debug::Describe;
 
 pub mod bounds;
 pub(crate) mod debug;
@@ -107,7 +90,7 @@ const TABLE_SCROLL_REVEAL_MARGIN: Pixels = Pixels::new(8.);
 pub const EMBEDDED_ITEM_FIRST_LINE_HEIGHT: f32 = 24.;
 
 pub const TEXT_SPACING: BlockSpacing = BlockSpacing {
-    margin: Margin::uniform(4.).with_right(16.),
+    margin: Margin::uniform(0.).with_right(16.),
     padding: Padding::uniform(0.),
 };
 
@@ -138,9 +121,9 @@ pub const BROKEN_LINK_SPACING: BlockSpacing = BlockSpacing {
 };
 
 pub const HEADER_SPACING: BlockSpacing = BlockSpacing {
-    margin: Margin::uniform(4.)
-        .with_top(12.)
-        .with_bottom(12.)
+    margin: Margin::uniform(0.)
+        .with_top(4.)
+        .with_bottom(4.)
         .with_right(16.),
     padding: Padding::uniform(0.),
 };
@@ -422,6 +405,11 @@ pub struct RenderState {
     show_final_trailing_newline_when_non_empty: bool,
     has_final_trailing_newline: Cell<bool>,
 
+    /// Whether the content tree currently contains any [`BlockItem::EmbeddedComment`] blocks.
+    /// Updated by `apply_comment_blocks` so that an empty incoming set can skip the full tree
+    /// rebuild when there are no existing comment blocks to remove.
+    has_comment_blocks: Cell<bool>,
+
     width_setting: WidthSetting,
 
     /// Channel for propagating updates from [`super::element::RichTextElement`] such as the
@@ -665,7 +653,7 @@ impl LineCount {
 }
 
 /// A character offset within a [`TextFrame`]. These offsets count characters in the Rust string
-/// passed to [`warpui::text_layout::LayoutCache::layout_text()`].
+/// passed to [`warpui_core::text_layout::LayoutCache::layout_text()`].
 ///
 /// Frame offsets often, but not always, correspond to glyph indices and caret positions. However,
 /// they do not line up 1:1 if a glyph or grapheme contains multiple characters
@@ -696,6 +684,32 @@ impl RenderLineLocation {
             RenderLineLocation::Current(line_count) => *line_count,
         }
     }
+}
+
+/// An inline comment block to host on a per-view [`RenderState`]. The child element is supplied by
+/// the app via a [`LaidOutEmbeddedItem`] (the same cross-crate boundary used by markdown embeds),
+/// keeping `warp_editor` independent of app-crate views.
+#[derive(Clone, Debug)]
+pub struct CommentBlock {
+    /// The render line the comment is anchored below.
+    pub location: RenderLineLocation,
+    /// The app-supplied, already laid-out child. Its height determines the reserved block height.
+    pub item: Arc<dyn LaidOutEmbeddedItem>,
+}
+
+impl CommentBlock {
+    pub fn new(location: RenderLineLocation, item: Arc<dyn LaidOutEmbeddedItem>) -> Self {
+        Self { location, item }
+    }
+}
+
+/// Content-space position of an inline comment block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CommentBlockPosition {
+    /// Content-space Y offset of the block's top (does not subtract scroll).
+    pub start_y_offset: Pixels,
+    /// The reserved height of the block (equal to the hosted element's laid-out height).
+    pub content_height: Pixels,
 }
 
 /// A point within the editor. Unlike character and hard-wrap offsets/points, this accounts for
@@ -806,6 +820,22 @@ pub enum BlockItem {
         paragraph: Paragraph,
     },
     Embedded(Arc<dyn LaidOutEmbeddedItem>),
+    /// A per-view inline comment block. It hosts an app-supplied child element (via
+    /// [`LaidOutEmbeddedItem::element`]) and reserves vertical space equal to that element's
+    /// laid-out height, while contributing no buffer characters or lines (like a
+    /// [`BlockItem::TemporaryBlock`]).
+    ///
+    /// It is intentionally a DISTINCT variant from [`BlockItem::TemporaryBlock`] so that
+    /// `reset_temporary_block` (run on every diff refresh) never removes it, and so it can only
+    /// ever live on a per-view [`RenderState`] — never on the shared buffer.
+    EmbeddedComment {
+        /// The full anchor of this comment. Carrying the location on the block (rather than
+        /// inferring it from tree position) lets `comment_block_position` match a comment by its
+        /// exact [`RenderLineLocation`] — including the `Temporary` removed-line slot index — even
+        /// after `reset_temporary_block` rebuilds the surrounding removed-line blocks.
+        location: RenderLineLocation,
+        item: Arc<dyn LaidOutEmbeddedItem>,
+    },
     HorizontalRule(HorizontalRuleConfig),
     Image {
         alt_text: String,
@@ -1766,6 +1796,7 @@ impl RenderState {
             styles,
             show_final_trailing_newline_when_non_empty: true,
             has_final_trailing_newline: Cell::new(true),
+            has_comment_blocks: Cell::new(false),
             viewport: ViewportState::new(viewport_width, viewport_height),
             selections: Default::default(),
             decorations: Default::default(),
@@ -2415,6 +2446,22 @@ impl RenderState {
                 ctx.emit(RenderEvent::LayoutUpdated);
                 ctx.notify();
             }
+            LayoutAction::SetCommentBlocks(blocks) => {
+                // Comment blocks are supplied already laid out by the app, so they don't require
+                // text layout. When laying out lazily, defer the reconcile to element-layout time
+                // for consistency with temporary blocks; otherwise apply it immediately.
+                if self.lazy_layout {
+                    self.pending_edits
+                        .lock()
+                        .push(PendingLayout::CommentBlocks(blocks));
+                } else {
+                    self.apply_comment_blocks(blocks);
+                    self.update_content_sizing();
+                }
+
+                ctx.emit(RenderEvent::LayoutUpdated);
+                ctx.notify();
+            }
             LayoutAction::BufferEdit {
                 delta,
                 buffer_version,
@@ -2527,6 +2574,9 @@ impl RenderState {
                     PendingLayout::TemporaryBlocks(blocks) => {
                         self.layout_temporary_blocks(blocks, app);
                     }
+                    PendingLayout::CommentBlocks(blocks) => {
+                        self.apply_comment_blocks(blocks);
+                    }
                 };
             }
         }
@@ -2577,6 +2627,211 @@ impl RenderState {
 
     pub fn add_temporary_blocks(&mut self, temporary_blocks: Vec<TemporaryBlock>) {
         self.submit_layout_action(LayoutAction::LayoutTemporaryBlock(temporary_blocks));
+    }
+
+    /// Reconcile the per-view set of inline comment blocks. `blocks` is the complete desired set:
+    /// existing comment blocks not present here are removed, and the supplied blocks are inserted
+    /// at their anchor lines. This is independent of [`Self::add_temporary_blocks`] — comment
+    /// blocks and diff removed-line temporary blocks coexist and never clobber each other.
+    pub fn set_comment_blocks(&mut self, blocks: Vec<CommentBlock>) {
+        self.submit_layout_action(LayoutAction::SetCommentBlocks(blocks));
+    }
+
+    /// Remove all inline comment blocks from this view, leaving temporary blocks untouched.
+    pub fn clear_comment_blocks(&mut self) {
+        self.set_comment_blocks(Vec::new());
+    }
+
+    /// Find the first inline comment block at `location` and map its hosted item through `f`. A
+    /// comment is matched by the FULL `RenderLineLocation` it carries, not by its line alone.
+    /// Because the anchor (including a `Temporary` removed-line slot index) travels on the block
+    /// itself, two comments sharing an `at_line` resolve unambiguously and the match holds even
+    /// after `reset_temporary_block` rebuilds the surrounding removed-line blocks.
+    ///
+    /// Comment blocks contribute zero lines, so every candidate sits exactly at the anchor's line
+    /// boundary: seek there (O(log n)) and scan only that boundary's run instead of walking the
+    /// whole tree. `SeekBias::Left` stops before the zero-extent items at the boundary; the scan
+    /// ends as soon as an item starts past the anchor line.
+    fn with_comment_block_at<T>(
+        &self,
+        location: RenderLineLocation,
+        f: impl FnOnce(Pixels, &Arc<dyn LaidOutEmbeddedItem>) -> T,
+    ) -> Option<T> {
+        let target = location.line_count();
+        let content = self.content.borrow();
+        let mut cursor = content.cursor::<LineCount, LayoutSummary>();
+        cursor.seek_clamped(&target, SeekBias::Left);
+        while let Some(positioned) = cursor.positioned_item() {
+            if positioned.start_line > target {
+                break;
+            }
+            if let BlockItem::EmbeddedComment {
+                location: block_location,
+                item,
+            } = positioned.item
+                && *block_location == location
+            {
+                return Some(f(positioned.start_y_offset, item));
+            }
+            cursor.next();
+        }
+        None
+    }
+
+    /// Content-space position and reserved height of the inline comment block anchored at
+    /// `location`, if one is present. `start_y_offset` is in content space (not viewport space)
+    /// and `content_height` is the hosted element's laid-out height.
+    pub fn comment_block_position(
+        &self,
+        location: RenderLineLocation,
+    ) -> Option<CommentBlockPosition> {
+        self.with_comment_block_at(location, |start_y_offset, item| CommentBlockPosition {
+            start_y_offset,
+            content_height: item.height(),
+        })
+    }
+
+    /// The app-supplied hosted item of the inline comment block anchored at `location`, or `None`
+    /// if no comment block is anchored there. Lets a host resolve the block's rendered content (for
+    /// example its body text) by downcasting the returned [`LaidOutEmbeddedItem`].
+    pub fn comment_block_item(
+        &self,
+        location: RenderLineLocation,
+    ) -> Option<Arc<dyn LaidOutEmbeddedItem>> {
+        self.with_comment_block_at(location, |_, item| item.clone())
+    }
+
+    /// Number of inline comment blocks ([`BlockItem::EmbeddedComment`]) currently in this view's
+    /// content tree, across all anchor lines. Diff removed-line temporary blocks are not counted.
+    pub fn comment_block_count(&self) -> usize {
+        let content = self.content.borrow();
+        let mut cursor = content.cursor::<LineCount, LayoutSummary>();
+        cursor.descend_to_first_item(&content, |_| true);
+        let mut count = 0;
+        while let Some(positioned) = cursor.positioned_item() {
+            if matches!(positioned.item, BlockItem::EmbeddedComment { .. }) {
+                count += 1;
+            }
+            cursor.next();
+        }
+        count
+    }
+
+    /// Group comment blocks by their full anchor [`RenderLineLocation`] and reconcile them into the
+    /// content tree. `Current` anchors are keyed by line; `Temporary` anchors are keyed by both the
+    /// `at_line` and the removed-line slot index, so two comments sharing an `at_line` but targeting
+    /// different removed-line slots do not collide.
+    fn apply_comment_blocks(&self, blocks: Vec<CommentBlock>) {
+        // Fast path: skip the full tree rebuild when nothing changes.
+        if blocks.is_empty() && !self.has_comment_blocks.get() {
+            return;
+        }
+        self.has_comment_blocks.set(!blocks.is_empty());
+
+        let mut current: HashMap<LineCount, Vec<BlockItem>> = HashMap::new();
+        let mut temporary: HashMap<(LineCount, usize), Vec<BlockItem>> = HashMap::new();
+        for block in blocks {
+            let item = BlockItem::EmbeddedComment {
+                location: block.location,
+                item: block.item,
+            };
+            match block.location {
+                RenderLineLocation::Current(line) => {
+                    current.entry(line).or_default().push(item);
+                }
+                RenderLineLocation::Temporary {
+                    at_line,
+                    index_from_at_line,
+                } => {
+                    temporary
+                        .entry((at_line, index_from_at_line))
+                        .or_default()
+                        .push(item);
+                }
+            }
+        }
+        self.reset_comment_blocks(current, temporary);
+    }
+
+    /// Replace all [`BlockItem::EmbeddedComment`]s in the content tree with a new set, keyed by the
+    /// full [`RenderLineLocation`] each block is anchored to. Every other block (including diff
+    /// removed-line [`BlockItem::TemporaryBlock`]s) is preserved exactly.
+    ///
+    /// A `Current(line)` comment is inserted after every block on that line (so it follows any
+    /// removed-line blocks). A `Temporary { at_line, index_from_at_line: k }` comment is inserted
+    /// immediately after the `k`-th removed-line [`BlockItem::TemporaryBlock`] on `at_line`, placing
+    /// it at exactly that removed-line slot. Skipping prior comment blocks while counting temporary
+    /// blocks keeps removed-line slot indices stable regardless of how many comments are anchored.
+    fn reset_comment_blocks(
+        &self,
+        mut current: HashMap<LineCount, Vec<BlockItem>>,
+        mut temporary: HashMap<(LineCount, usize), Vec<BlockItem>>,
+    ) {
+        let mut new_tree = SumTree::new();
+        {
+            let content = self.content.borrow();
+            let mut cursor = content.cursor::<LineCount, CharOffset>();
+
+            // Comments anchored before the first line of content.
+            if let Some(items) = current.remove(&LineCount::zero()) {
+                for item in items {
+                    new_tree.push(item);
+                }
+            }
+
+            cursor.descend_to_first_item(&content, |_| true);
+            let mut last_temp_line: Option<LineCount> = None;
+            let mut temp_index: usize = 0;
+            while let Some(item) = cursor.item() {
+                if !matches!(item, BlockItem::EmbeddedComment { .. }) {
+                    new_tree.push(item.clone());
+                }
+
+                let line_at_end = cursor.end_seek_position();
+
+                // A removed-line block defines a `Temporary` slot. Append any comment anchored to
+                // that exact (at_line, index) slot, then advance the slot index for this line.
+                if matches!(item, BlockItem::TemporaryBlock { .. }) {
+                    temp_index = if last_temp_line == Some(line_at_end) {
+                        temp_index + 1
+                    } else {
+                        0
+                    };
+                    last_temp_line = Some(line_at_end);
+                    if let Some(items) = temporary.remove(&(line_at_end, temp_index)) {
+                        for item in items {
+                            new_tree.push(item);
+                        }
+                    }
+                }
+
+                cursor.next();
+
+                // Once every (possibly zero-line) item on `line_at_end` has been pushed — detected
+                // when the next item begins a later line, or the tree ends — append that line's
+                // `Current` comment blocks. This keeps them after any temporary blocks on the line.
+                let line_complete = match cursor.item() {
+                    None => true,
+                    Some(_) => cursor.end_seek_position() > line_at_end,
+                };
+                if line_complete && let Some(items) = current.remove(&line_at_end) {
+                    for item in items {
+                        new_tree.push(item);
+                    }
+                }
+            }
+        }
+        if !current.is_empty() || !temporary.is_empty() {
+            log::debug!(
+                "reset_comment_blocks: {} current and {} temporary comment blocks had no matching \
+                 anchor line and were dropped",
+                current.len(),
+                temporary.len(),
+            );
+        }
+        self.has_final_trailing_newline
+            .set(Self::tree_ends_with_trailing_newline(&new_tree));
+        *self.content.borrow_mut() = new_tree;
     }
 
     /// Replace all temporary blocks in the BlockItem cache with a new set of temporary
@@ -2679,8 +2934,11 @@ impl RenderState {
             sub_tree_cursor.descend_to_first_item(&sub_tree, |_| true);
 
             while let Some(item) = sub_tree_cursor.item() {
-                // Do not remove the temporary blocks within the replaced range.
-                if matches!(item, BlockItem::TemporaryBlock { .. }) {
+                // Do not remove the temporary or comment blocks within the replaced range.
+                if matches!(
+                    item,
+                    BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. }
+                ) {
                     new_tree.push(item.clone());
                 }
 
@@ -2714,10 +2972,12 @@ impl RenderState {
                 // exclusive, we can't otherwise represent "before the first block".
                 if effective_end > CharOffset::zero() {
                     if let Some(item) = cursor.item() {
-                        // Do not remove the temporary blocks within the replaced range.
-                        if matches!(item, BlockItem::TemporaryBlock { .. })
-                            || (cursor.end() > effective_end
-                                && matches!(item, BlockItem::Hidden(_)))
+                        // Do not remove the temporary or comment blocks within the replaced range.
+                        if matches!(
+                            item,
+                            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. }
+                        ) || (cursor.end() > effective_end
+                            && matches!(item, BlockItem::Hidden(_)))
                         {
                             new_tree.push(item.clone());
                         }
@@ -3320,6 +3580,7 @@ enum PendingLayout {
         hidden_ranges: Option<RangeSet<CharOffset>>,
     },
     TemporaryBlocks(Vec<TemporaryBlock>),
+    CommentBlocks(Vec<CommentBlock>),
 }
 
 struct PendingSelectionUpdate {
@@ -3343,6 +3604,9 @@ enum LayoutAction {
         buffer_version: BufferVersion,
     },
     LayoutTemporaryBlock(Vec<TemporaryBlock>),
+    /// Reconcile the set of per-view inline comment blocks. The supplied vector is the complete
+    /// desired set: any existing comment blocks not present here are removed.
+    SetCommentBlocks(Vec<CommentBlock>),
     /// Autoscroll, to the specified range if `Some` or to the cursor location if `None`.
     Autoscroll {
         mode: AutoScrollMode,
@@ -3501,7 +3765,11 @@ impl BlockItem {
             BlockItem::HorizontalRule(config) => config.line_height.as_f32(),
             BlockItem::Image { config, .. } => config.height.as_f32(),
             BlockItem::Table(laid_out_table) => laid_out_table.height().as_f32(),
-            BlockItem::Embedded(embedded_item) => embedded_item.height().as_f32(),
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.height().as_f32(),
             BlockItem::Hidden(config) => config.height().as_f32(),
         }
     }
@@ -3525,7 +3793,11 @@ impl BlockItem {
             BlockItem::HorizontalRule(config) => config.spacing,
             BlockItem::Image { config, .. } => config.spacing,
             BlockItem::Table(laid_out_table) => laid_out_table.spacing(),
-            BlockItem::Embedded(embedded_item) => embedded_item.spacing(),
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.spacing(),
             BlockItem::Hidden { .. } => BlockSpacing::default(),
         }
     }
@@ -3558,7 +3830,11 @@ impl BlockItem {
                 }
                 height
             }
-            BlockItem::Embedded(embedded_item) => embedded_item.height(),
+            BlockItem::Embedded(embedded_item)
+            | BlockItem::EmbeddedComment {
+                item: embedded_item,
+                ..
+            } => embedded_item.height(),
             BlockItem::HorizontalRule(rule) => rule.line_height,
             BlockItem::Image { config, .. } => config.height,
             BlockItem::Table(laid_out_table) => laid_out_table.height(),
@@ -3582,7 +3858,9 @@ impl BlockItem {
             } => paragraph_block.width(),
             BlockItem::MermaidDiagram { config, .. } => config.width,
             BlockItem::TrailingNewLine(cursor) => cursor.width,
-            BlockItem::Embedded(object) => object.size().x().into_pixels(),
+            BlockItem::Embedded(object) | BlockItem::EmbeddedComment { item: object, .. } => {
+                object.size().x().into_pixels()
+            }
             BlockItem::HorizontalRule(rule) => rule.width,
             BlockItem::Image { config, .. } => config.width,
             BlockItem::Table(laid_out_table) => laid_out_table.width(),
@@ -3610,7 +3888,9 @@ impl BlockItem {
             BlockItem::RunnableCodeBlock {
                 paragraph_block, ..
             } => paragraph_block.content_length(),
-            BlockItem::TemporaryBlock { .. } => CharOffset::zero(),
+            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. } => {
+                CharOffset::zero()
+            }
             BlockItem::MermaidDiagram { content_length, .. } => *content_length,
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
@@ -3632,7 +3912,7 @@ impl BlockItem {
             BlockItem::RunnableCodeBlock {
                 paragraph_block, ..
             } => paragraph_block.lines(),
-            BlockItem::TemporaryBlock { .. } => LineCount(0),
+            BlockItem::TemporaryBlock { .. } | BlockItem::EmbeddedComment { .. } => LineCount(0),
             BlockItem::MermaidDiagram { .. } => LineCount(1),
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
@@ -3659,6 +3939,7 @@ impl BlockItem {
             BlockItem::MermaidDiagram { .. } => false,
             // Embeds, images, tables, and horizontal rules are never empty.
             BlockItem::Embedded(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::Table(_)
@@ -3718,6 +3999,7 @@ impl Positioned<'_, BlockItem> {
             BlockItem::MermaidDiagram { .. } => self.start_char_offset,
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::TemporaryBlock { .. }
@@ -3783,6 +4065,7 @@ impl Positioned<'_, BlockItem> {
             }
             BlockItem::TrailingNewLine(_)
             | BlockItem::Embedded(_)
+            | BlockItem::EmbeddedComment { .. }
             | BlockItem::HorizontalRule(_)
             | BlockItem::Image { .. }
             | BlockItem::TemporaryBlock { .. }
@@ -3866,7 +4149,9 @@ impl Positioned<'_, BlockItem> {
                 let origin = self.content_origin();
                 Some(RectF::new(origin, embedded_item.size()))
             }
-            BlockItem::TemporaryBlock { .. } | BlockItem::Hidden { .. } => None,
+            BlockItem::TemporaryBlock { .. }
+            | BlockItem::EmbeddedComment { .. }
+            | BlockItem::Hidden { .. } => None,
         }
     }
 
@@ -3924,7 +4209,9 @@ impl Positioned<'_, BlockItem> {
                 let origin = self.visible_origin();
                 RectF::new(origin, embedded_item.first_line_bound())
             }
-            BlockItem::TemporaryBlock { .. } | BlockItem::Hidden { .. } => return None,
+            BlockItem::TemporaryBlock { .. }
+            | BlockItem::EmbeddedComment { .. }
+            | BlockItem::Hidden { .. } => return None,
         };
 
         // At the block level, we want to include any space for list bullets and other
@@ -4319,7 +4606,7 @@ impl<'a> Positioned<'a, Paragraph> {
                 vec2f(underline_width, UNDERLINE_THICKNESS),
             );
 
-            let dash = warpui::scene::Dash {
+            let dash = warpui_core::scene::Dash {
                 dash_length: DASHED_UNDERLINE_DASH_LENGTH,
                 gap_length: DASHED_UNDERLINE_GAP_LENGTH,
                 force_consistent_gap_length: true,
@@ -4328,7 +4615,7 @@ impl<'a> Positioned<'a, Paragraph> {
                 .scene
                 .draw_rect_without_hit_recording(underline_rect)
                 .with_border(
-                    warpui::scene::Border::bottom(UNDERLINE_THICKNESS)
+                    warpui_core::scene::Border::bottom(UNDERLINE_THICKNESS)
                         .with_dashed_border(dash)
                         .with_border_color(color),
                 );

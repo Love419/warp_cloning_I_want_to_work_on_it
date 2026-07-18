@@ -1,46 +1,44 @@
-use serde::Serialize;
 use std::rc::Rc;
+
+use pathfinder_geometry::vector::vec2f;
+use serde::Serialize;
+use warp_core::channel::ChannelState;
+use warp_core::ui::theme::color::internal_colors::{neutral_2, neutral_3};
+use warpui::elements::{
+    ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty,
+    Fill, Flex, HighlightedHyperlink, Hoverable, Icon, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius,
+    Shrinkable, Stack, Text,
+};
+use warpui::keymap::Keystroke;
+use warpui::platform::Cursor;
+use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
+use warpui::{
+    AppContext, Element, Entity, EventContext, ModelHandle, SingletonEntity, TypedActionView, View,
+    ViewContext, ViewHandle,
+};
 
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::{PassiveSuggestionTrigger, StaticQueryType};
 use crate::ai::blocklist::prompt::prompt_alert::{
     PromptAlertEvent, PromptAlertState, PromptAlertView,
 };
 use crate::ai::blocklist::BlocklistAIInputModel;
 use crate::ai::predict::prompt_suggestions::ACCEPT_PROMPT_SUGGESTION_KEYBINDING;
+use crate::appearance::Appearance;
+use crate::server::ids::ServerId;
 use crate::server::telemetry::InteractionSource;
 use crate::settings::InputSettings;
 use crate::terminal::view::passive_suggestions::PromptSuggestionResolution;
-use crate::util::bindings::keybinding_name_to_keystroke;
-use pathfinder_geometry::vector::vec2f;
-use warpui::elements::{
-    ChildAnchor, ChildView, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Empty,
-    Fill, Flex, HighlightedHyperlink, Hoverable, Icon, MainAxisAlignment, MainAxisSize,
-    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
-    Text,
-};
-use warpui::keymap::Keystroke;
-use warpui::platform::Cursor;
-use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
-use warpui::{elements::MouseStateHandle, Element};
-use warpui::{
-    AppContext, Entity, EventContext, ModelHandle, TypedActionView, ViewContext, ViewHandle,
-};
-use warpui::{SingletonEntity, View};
-
-use crate::terminal::view::{ContextMenuAction, InputType, PromptSuggestion};
+use crate::terminal::view::{ContextMenuAction, InputType, PromptSuggestion, TerminalAction};
 use crate::ui_components::blended_colors;
-use crate::{appearance::Appearance, terminal::view::TerminalAction};
-use warp_core::channel::ChannelState;
-use warp_core::ui::theme::color::internal_colors::{neutral_2, neutral_3};
-
 use crate::ui_components::icons::Icon as WarpUIIcon;
-
-use crate::ai::agent::{PassiveSuggestionTrigger, StaticQueryType};
-use crate::server::ids::ServerId;
+use crate::util::bindings::keybinding_name_to_keystroke;
 
 const INLINE_BANNER_SPACING: f32 = 8.;
 const INLINE_BANNER_BUTTON_PADDING: f32 = 8.;
+const INLINE_BANNER_BUTTON_VERTICAL_PADDING: f32 = 4.;
 
 const DELINQUENT_DUE_TO_PAYMENT_ISSUE_TOOLTIP_MESSAGE: &str = "Restricted due to payment issue";
 const OUT_OF_REQUESTS_TOOLTIP_MESSAGE: &str = "Out of credits";
@@ -132,7 +130,6 @@ fn render_button(
     prompt_alert_state: &PromptAlertState,
     should_shrink: bool,
     appearance: &Appearance,
-    app: &AppContext,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
     let is_button_disabled = matches!(
@@ -161,21 +158,17 @@ fn render_button(
         }
 
         let icon_size = appearance.monospace_font_size();
-        let button_height = app.font_cache().line_height(
-            appearance.monospace_font_size(),
-            appearance.line_height_ratio(),
-        ) + 14.;
-        // Need this to have reasonable keyboard shortcut heights.
-        // let keyboard_shortcut_icon_height = button_height - 6.;
         let mut icon_color = blended_colors::text_main(theme, theme.surface_1());
         icon_color.a = opacity_u8;
 
+        let should_expand_button = mouse_state.is_hovered();
         let text = {
-            let base = Text::new_inline(
+            let base = Text::new(
                 text,
                 appearance.ui_font_family(),
                 appearance.monospace_font_size(),
             )
+            .soft_wrap(should_expand_button)
             .with_color(text_color)
             .finish();
 
@@ -230,7 +223,9 @@ fn render_button(
         let mut container = Container::new(flex.finish())
             .with_background(background_fill)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-            .with_padding_right(INLINE_BANNER_BUTTON_PADDING);
+            .with_padding_right(INLINE_BANNER_BUTTON_PADDING)
+            .with_padding_top(INLINE_BANNER_BUTTON_VERTICAL_PADDING)
+            .with_padding_bottom(INLINE_BANNER_BUTTON_VERTICAL_PADDING);
 
         if button_index != 0 {
             container = container.with_margin_left(INLINE_BANNER_SPACING);
@@ -268,9 +263,7 @@ fn render_button(
             }
         }
 
-        ConstrainedBox::new(stack.finish())
-            .with_height(button_height)
-            .finish()
+        stack.finish()
     })
     .with_cursor(Cursor::PointingHand);
 
@@ -423,7 +416,6 @@ impl View for PromptSuggestionsView {
                     prompt_alert_state,
                     true, // should_shrink
                     appearance,
-                    app,
                 ),
             )
             .finish(),

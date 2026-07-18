@@ -1,23 +1,21 @@
-use std::{any::Any, future::Future, marker::PhantomData, sync::Arc};
+use std::any::Any;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-use crate::{
-    r#async::{SpawnableOutput, Timer},
-    windowing::WindowManager,
-    ReadModel, ReadView, UpdateView, View, ViewAsRef, ViewContext, ViewHandle, WeakModelHandle,
-};
 use anyhow::Result;
-use futures::{
-    stream::{AbortHandle, Abortable},
-    FutureExt,
-};
+use futures::stream::{AbortHandle, Abortable};
+use futures::FutureExt;
 use thiserror::Error;
 
+use crate::accessibility::AccessibilityContent;
+use crate::core::{Observation, Subscription, SubscriptionKey, TaskCallback};
+use crate::r#async::{executor, SpawnableOutput, SpawnedFutureHandle, SpawnedLocalStream, Timer};
+use crate::windowing::WindowManager;
 use crate::{
-    accessibility::AccessibilityContent,
-    core::{Observation, Subscription, SubscriptionKey, TaskCallback},
-    r#async::{executor, SpawnedFutureHandle, SpawnedLocalStream},
     AppContext, Effect, Entity, EntityId, GetSingletonModelHandle, ModelAsRef, ModelHandle,
-    RequestState, RetryOption, UpdateModel,
+    ReadModel, ReadView, RequestState, RetryOption, UpdateModel, UpdateView, View, ViewAsRef,
+    ViewContext, ViewHandle, WeakModelHandle,
 };
 
 /// Error returned when a model has been dropped, and so references to it are invalid.
@@ -636,9 +634,11 @@ impl<M> ModelSpawner<M> {
         work: impl FnOnce(&mut M, &mut ModelContext<M>) -> R + Send + 'static,
     ) -> Result<R, ModelDropped> {
         let (tx, rx) = futures::channel::oneshot::channel();
+        let span = tracing::Span::current();
 
         self.task_sender
             .send(Box::new(move |me, ctx| {
+                let _guard = span.enter();
                 let result = work(me, ctx);
                 // If the background task has dropped the receiver, then we don't need to send
                 // the result, and there's no one to inform regardless.

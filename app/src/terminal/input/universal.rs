@@ -1,34 +1,26 @@
-use crate::{
-    ai::blocklist::InputType,
-    appearance::Appearance,
-    context_chips::spacing,
-    features::FeatureFlag,
-    settings::{AppEditorSettings, InputModeSettings},
-    terminal::{
-        block_list_viewport::InputMode,
-        input::{InputAction, InputDropTargetData},
-        settings::TerminalSettings,
-        view::TerminalAction,
-    },
-    themes::theme::color::internal_colors,
-};
 use settings::Setting;
-use warpui::{
-    elements::{
-        Border, ChildView, Container, CornerRadius, DropTarget, Element, Flex, Hoverable,
-        ParentElement, Radius, SavePosition, Stack,
-    },
-    AppContext, SingletonEntity,
+use warpui::elements::{
+    Border, ChildView, Container, CornerRadius, DropTarget, Element, Flex, Hoverable,
+    ParentElement, Radius, SavePosition, Stack,
 };
+use warpui::{AppContext, SingletonEntity};
 
-use super::{
-    common::{
-        add_command_xray_overlay, add_input_suggestions_overlays, add_vim_status_to_stack,
-        add_voltron_overlay, add_workflow_info_overlay, maybe_add_buy_credits_banner,
-        wrap_input_with_terminal_padding_and_focus_handler,
-    },
-    Input,
+use super::common::{
+    add_command_xray_overlay, add_input_suggestions_overlays, add_vim_status_to_stack,
+    add_voltron_overlay, add_workflow_info_overlay, maybe_add_buy_credits_banner,
+    wrap_input_with_terminal_padding_and_focus_handler,
 };
+use super::Input;
+use crate::ai::blocklist::InputType;
+use crate::appearance::Appearance;
+use crate::context_chips::spacing;
+use crate::features::FeatureFlag;
+use crate::settings::{AppEditorSettings, InputModeSettings};
+use crate::terminal::block_list_viewport::InputMode;
+use crate::terminal::input::{InputAction, InputDropTargetData};
+use crate::terminal::settings::TerminalSettings;
+use crate::terminal::view::TerminalAction;
+use crate::themes::theme::color::internal_colors;
 
 impl Input {
     /// Renders the universal input. This is used when `FeatureFlag::AgentView` is disabled and the
@@ -61,9 +53,7 @@ impl Input {
         let mut column = Flex::column();
 
         if matches!(input_mode, InputMode::PinnedToBottom | InputMode::Waterfall) {
-            if let Some(banner) =
-                self.render_input_banner(appearance, app, input_mode, is_compact_mode)
-            {
+            if let Some(banner) = self.render_input_banner(app, input_mode, is_compact_mode) {
                 column.add_child(
                     Container::new(banner)
                         .with_margin_top(spacing::UDI_CHIP_MARGIN)
@@ -101,9 +91,7 @@ impl Input {
         column.add_child(ChildView::new(&self.universal_developer_input_button_bar).finish());
 
         if matches!(input_mode, InputMode::PinnedToTop) {
-            if let Some(banner) =
-                self.render_input_banner(appearance, app, input_mode, is_compact_mode)
-            {
+            if let Some(banner) = self.render_input_banner(app, input_mode, is_compact_mode) {
                 column.add_child(
                     Container::new(banner)
                         .with_margin_bottom(spacing::UDI_CHIP_MARGIN)

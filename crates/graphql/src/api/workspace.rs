@@ -1,6 +1,5 @@
-use crate::schema;
-
 use super::billing::{BillingCycleUsageHistory, BillingMetadata, BonusGrantsInfo};
+use crate::schema;
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct Workspace {
@@ -288,6 +287,7 @@ pub enum LlmModelHost {
     AwsBedrock,
     CustomEndpoint,
     DirectApi,
+    GeminiEnterprise,
     #[cynic(fallback)]
     Other(String),
 }
@@ -304,6 +304,8 @@ pub struct LlmHostSettings {
     pub enabled: bool,
     pub opt_out_of_new_models: bool,
     pub enablement_setting: Option<HostEnablementSetting>,
+    pub gcp_audience: Option<String>,
+    pub gcp_sa_email: Option<String>,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
