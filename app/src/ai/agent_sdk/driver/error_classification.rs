@@ -1,7 +1,7 @@
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 
 use super::terminal::ShareSessionError;
-use super::AgentDriverError;
+use super::{format_mcp_startup_failure_details, AgentDriverError};
 use crate::ai::blocklist::local_agent_task_sync_model::classify_renderable_error;
 use crate::server::server_api::ai::TaskStatusUpdate;
 
@@ -105,6 +105,18 @@ pub fn classify_driver_error(error: &AgentDriverError) -> (AgentTaskState, TaskS
             TaskStatusUpdate::with_error_code(
                 format!(
                     "MCP server {uuid} was not found. Verify the server exists in your Warp Drive and the UUID is correct."
+                ),
+                PlatformErrorCode::EnvironmentSetupFailed,
+            ),
+        ),
+        AgentDriverError::MCPStartupFailed { details, .. } => (
+            AgentTaskState::Failed,
+            TaskStatusUpdate::with_error_code(
+                format!(
+                    "One or more MCP servers failed to start. Failed servers: {}. \
+                     MCP logs are not included because they may contain sensitive data. \
+                     Check the named server configuration, command/URL, required environment variables or secrets, and whether the command is available in the cloud agent environment.",
+                    format_mcp_startup_failure_details(details)
                 ),
                 PlatformErrorCode::EnvironmentSetupFailed,
             ),

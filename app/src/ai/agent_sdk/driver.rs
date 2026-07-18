@@ -214,6 +214,14 @@ impl<T: Send + 'static> IdleTimeoutSender<T> {
     }
 }
 
+fn mcp_startup_failed_error(details: Vec<MCPStartupFailureDetail>) -> AgentDriverError {
+    let details = sorted_mcp_startup_failure_details(details);
+    AgentDriverError::MCPStartupFailed {
+        summary: format_mcp_startup_failure_details(&details),
+        details,
+    }
+}
+
 /// How to resume an existing conversation when starting an agent run.
 ///
 /// The Oz harness restores the full conversation transcript into the terminal pane and treats
@@ -388,6 +396,163 @@ pub struct Task {
     /// Which harness to use for executing the agent run.
     pub harness: HarnessKind,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MCPStartupFailureDetail {
+    server_name: String,
+    reason: String,
+}
+
+impl MCPStartupFailureDetail {
+    fn new(server_name: String, reason: String) -> Self {
+        Self {
+            server_name: sanitize_mcp_server_name_for_error(&server_name),
+            reason,
+        }
+    }
+}
+
+fn sanitize_mcp_server_name_for_error(server_name: &str) -> String {
+    const MAX_SERVER_NAME_LEN: usize = 120;
+
+    let sanitized = server_name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        return "<unknown>".to_string();
+    }
+    trimmed.chars().take(MAX_SERVER_NAME_LEN).collect()
+}
+
+struct MCPStartupWaitState {
+    pending_servers: HashMap<Uuid, String>,
+    failed_servers: Vec<MCPStartupFailureDetail>,
+}
+
+impl MCPStartupWaitState {
+    fn new(server_names: HashMap<Uuid, String>) -> Self {
+        Self {
+            pending_servers: server_names,
+            failed_servers: Vec::new(),
+        }
+    }
+
+    fn final_result(&self) -> Result<(), AgentDriverError> {
+        if self.failed_servers.is_empty() {
+            Ok(())
+        } else {
+            Err(mcp_startup_failed_error(self.failed_servers.clone()))
+        }
+    }
+
+    fn timeout_result(&self) -> AgentDriverError {
+        let mut details = self.failed_servers.clone();
+        details.extend(self.pending_servers.values().map(|server_name| {
+            MCPStartupFailureDetail::new(
+                server_name.clone(),
+                mcp_startup_timeout_reason().to_string(),
+            )
+        }));
+        mcp_startup_failed_error(details)
+    }
+}
+
+fn sorted_mcp_startup_failure_details(
+    mut details: Vec<MCPStartupFailureDetail>,
+) -> Vec<MCPStartupFailureDetail> {
+    details.sort_by(|a, b| {
+        a.server_name
+            .cmp(&b.server_name)
+            .then_with(|| a.reason.cmp(&b.reason))
+    });
+    details
+}
+
+fn format_mcp_startup_failure_details(details: &[MCPStartupFailureDetail]) -> String {
+    if details.is_empty() {
+        return "No per-server failure details were available.".to_string();
+    }
+
+    details
+        .iter()
+        .map(|detail| format!("{} ({})", detail.server_name, detail.reason))
+        .join(", ")
+}
+
+fn mcp_startup_timeout_reason() -> &'static str {
+    "startup timed out before the server completed MCP initialization"
+}
+
+fn sanitize_mcp_startup_failure_reason(
+    raw_reason: Option<&str>,
+    state: Option<MCPServerState>,
+) -> String {
+    let Some(raw_reason) = raw_reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    else {
+        return match state {
+            Some(MCPServerState::Starting) => mcp_startup_timeout_reason().to_string(),
+            Some(MCPServerState::FailedToStart) => {
+                "startup failed before Warp received a safe failure reason".to_string()
+            }
+            _ => "startup did not complete before Warp received a safe failure reason".to_string(),
+        };
+    };
+    let lower = raw_reason.to_lowercase();
+    match () {
+        _ if lower.contains("path required")
+            || lower.contains("path not available")
+            || lower.contains("unknown path") =>
+        {
+            "PATH was unavailable when Warp tried to launch the MCP command".to_string()
+        }
+        _ if lower.contains("no such file")
+            || lower.contains("not found")
+            || lower.contains("command not found") =>
+        {
+            "the configured MCP command could not be found in the agent environment".to_string()
+        }
+        _ if lower.contains("permission denied") => {
+            "the configured MCP command could not be executed because of file permissions"
+                .to_string()
+        }
+        _ if lower.contains("timed out") || lower.contains("timeout") => {
+            mcp_startup_timeout_reason().to_string()
+        }
+        _ if lower.contains("connection closed")
+            || lower.contains("closed unexpectedly")
+            || lower.contains("server may have crashed") =>
+        {
+            "the MCP server process exited or closed the connection during initialization"
+                .to_string()
+        }
+        _ if lower.contains("failed to establish connection")
+            || lower.contains("transport")
+            || lower.contains("connection") =>
+        {
+            "Warp could not establish the MCP transport connection".to_string()
+        }
+        _ if lower.contains("failed to initialize client")
+            || lower.contains("failed to initialize server")
+            || lower.contains("unexpected response")
+            || lower.contains("incompatible") =>
+        {
+            "MCP protocol initialization failed".to_string()
+        }
+        _ if lower.contains("server returned an error") || lower.contains("mcp error") => {
+            "the MCP server returned an error during startup".to_string()
+        }
+        _ if lower.contains("parse")
+            || lower.contains("json")
+            || lower.contains("template contains no servers") =>
+        {
+            "the MCP server JSON configuration is invalid".to_string()
+        }
+        _ => "startup failed before Warp received a safe failure reason".to_string(),
+    }
+}
 
 struct GlobalSkillResolution {
     specs: Vec<SkillSpec>,
@@ -418,6 +583,10 @@ pub enum AgentDriverError {
     InvalidRuntimeState,
     #[error("Requested MCP server not found: {0}")]
     MCPServerNotFound(uuid::Uuid),
+    #[error("Failed to start MCP servers: {summary}")]
+    MCPStartupFailed {
+        summary: String,
+        details: Vec<MCPStartupFailureDetail>,
     #[error("Failed to start MCP servers: {}", .details.join("; "))]
     MCPStartupFailed {
         /// One line per unavailable server (e.g. "'datadog' failed to start:
@@ -1046,6 +1215,126 @@ impl AgentDriver {
         Ok(servers_to_start)
     }
 
+    fn mcp_server_name_for_uuid(uuid: Uuid, ctx: &ModelContext<Self>) -> String {
+        TemplatableMCPServerManager::as_ref(ctx)
+            .get_installed_server(&uuid)
+            .map(|installation| installation.templatable_mcp_server().name.clone())
+            .or_else(|| {
+                FileBasedMCPManager::as_ref(ctx)
+                    .get_installation_by_uuid(uuid)
+                    .map(|installation| installation.templatable_mcp_server().name.clone())
+            })
+            .unwrap_or_else(|| uuid.to_string())
+    }
+
+    fn mcp_startup_failure_detail(
+        uuid: Uuid,
+        server_name: String,
+        ctx: &ModelContext<Self>,
+    ) -> MCPStartupFailureDetail {
+        let manager = TemplatableMCPServerManager::as_ref(ctx);
+        let reason = sanitize_mcp_startup_failure_reason(
+            manager.get_server_error_message(uuid),
+            manager.get_server_state(uuid),
+        );
+        MCPStartupFailureDetail::new(server_name, reason)
+    }
+
+    fn mcp_startup_timeout_result(
+        wait_state: &Arc<Mutex<MCPStartupWaitState>>,
+    ) -> AgentDriverError {
+        if let Ok(state) = wait_state.lock() {
+            state.timeout_result()
+        } else {
+            AgentDriverError::MCPStartupFailed {
+                summary: "No per-server failure details were available.".to_string(),
+                details: Vec::new(),
+            }
+        }
+    }
+
+    fn mcp_startup_final_result(
+        wait_state: &Arc<Mutex<MCPStartupWaitState>>,
+    ) -> Result<(), AgentDriverError> {
+        if let Ok(state) = wait_state.lock() {
+            state.final_result()
+        } else {
+            Err(AgentDriverError::InvalidRuntimeState)
+        }
+    }
+
+    fn mcp_server_names_for_uuids(
+        uuids: &HashSet<Uuid>,
+        ctx: &ModelContext<Self>,
+    ) -> HashMap<Uuid, String> {
+        uuids
+            .iter()
+            .map(|uuid| (*uuid, Self::mcp_server_name_for_uuid(*uuid, ctx)))
+            .collect()
+    }
+
+    fn subscribe_to_mcp_managers(
+        &self,
+        tx: Sender<Result<(), AgentDriverError>>,
+        wait_state: Arc<Mutex<MCPStartupWaitState>>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let templatable_mcp_manager = TemplatableMCPServerManager::handle(ctx);
+        let manager_clone = templatable_mcp_manager.clone();
+        let mut tx = Some(tx);
+        ctx.subscribe_to_model(
+            &templatable_mcp_manager,
+            move |_me, event, ctx| match event {
+                TemplatableMCPServerManagerEvent::StateChanged { uuid, state } => {
+                    let server_name = wait_state
+                        .lock()
+                        .ok()
+                        .and_then(|state| state.pending_servers.get(uuid).cloned());
+                    let Some(server_name) = server_name else {
+                        return;
+                    };
+                    match state {
+                        MCPServerState::Running => {
+                            let pending_empty = wait_state
+                                .lock()
+                                .map(|mut state| {
+                                    state.pending_servers.remove(uuid);
+                                    state.pending_servers.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if pending_empty {
+                                let result = Self::mcp_startup_final_result(&wait_state);
+                                if result.is_ok() {
+                                    log::info!("All MCP servers started");
+                                } else {
+                                    log::warn!("One or more MCP servers failed to start");
+                                }
+                                if let Some(sender) = tx.take() {
+                                    let _ = sender.send(result);
+                                }
+                                ctx.unsubscribe_from_model(&manager_clone);
+                            }
+                        }
+                        MCPServerState::FailedToStart => {
+                            log::warn!("Failed to start MCP server {uuid}");
+                            let detail = Self::mcp_startup_failure_detail(*uuid, server_name, ctx);
+                            let pending_empty = wait_state
+                                .lock()
+                                .map(|mut state| {
+                                    state.pending_servers.remove(uuid);
+                                    state.failed_servers.push(detail);
+                                    state.pending_servers.is_empty()
+                                })
+                                .unwrap_or(false);
+                            if !pending_empty {
+                                return;
+                            }
+                            if let Some(sender) = tx.take() {
+                                let _ = sender.send(Self::mcp_startup_final_result(&wait_state));
+                            }
+                            ctx.unsubscribe_from_model(&manager_clone);
+                        }
+                        _ => {}
     /// Subscribe to MCP server state changes and wait for every server in
     /// `servers` (keyed by installation UUID, valued by display name) to reach
     /// a terminal state (`Running` or `FailedToStart`), up to the configured
@@ -1280,6 +1569,26 @@ impl AgentDriver {
 
         log::info!("Starting {} MCP servers...", servers_to_start.len());
 
+        let server_names = Self::mcp_server_names_for_uuids(&servers_to_start, ctx);
+        let wait_state = Arc::new(Mutex::new(MCPStartupWaitState::new(server_names)));
+
+        self.subscribe_to_mcp_managers(tx, Arc::clone(&wait_state), ctx);
+
+        self.spawn_inactive_servers(servers_to_start, ctx);
+
+        Either::Left(async move {
+            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(Canceled)) => {
+                    log::error!("Subscription dropped before MCP servers started");
+                    Err(AgentDriverError::InvalidRuntimeState)
+                }
+                Err(TimeoutError) => {
+                    log::error!("Timed out waiting for MCP servers to start");
+                    Err(Self::mcp_startup_timeout_result(&wait_state))
+                }
+            }
+        })
         let named_servers: HashMap<Uuid, String> = {
             let manager = TemplatableMCPServerManager::as_ref(ctx);
             servers_to_start
@@ -1316,6 +1625,21 @@ impl AgentDriver {
             installation.apply_secrets(&self.secrets);
         }
 
+        let (tx, rx) = oneshot::channel();
+        let server_names: HashMap<Uuid, String> = installations
+            .iter()
+            .map(|installation| {
+                (
+                    installation.uuid(),
+                    installation.templatable_mcp_server().name.clone(),
+                )
+            })
+            .collect();
+        let wait_state = Arc::new(Mutex::new(MCPStartupWaitState::new(server_names)));
+
+        log::info!("Starting {} ephemeral MCP servers...", installations.len());
+
+        self.subscribe_to_mcp_managers(tx, Arc::clone(&wait_state), ctx);
         log::info!("Starting {} ephemeral MCP servers...", installations.len());
 
         let named_servers: HashMap<Uuid, String> = installations
@@ -1337,6 +1661,19 @@ impl AgentDriver {
             }
         });
 
+        Either::Left(async move {
+            match rx.with_timeout(MCP_SERVER_STARTUP_TIMEOUT).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(Canceled)) => {
+                    log::error!("Subscription dropped before ephemeral MCP servers started");
+                    Err(AgentDriverError::InvalidRuntimeState)
+                }
+                Err(TimeoutError) => {
+                    log::error!("Timed out waiting for ephemeral MCP servers to start");
+                    Err(Self::mcp_startup_timeout_result(&wait_state))
+                }
+            }
+        })
         Either::Left(wait)
     }
 
