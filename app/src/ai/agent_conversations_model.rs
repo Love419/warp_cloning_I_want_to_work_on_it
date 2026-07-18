@@ -1067,6 +1067,7 @@ impl AgentConversationsModel {
                     model.cloud_conversation_metadata_load_state =
                         CloudConversationMetadataLoadState::Failed;
                     model.update_polling_state(ctx);
+                    ctx.emit(AgentConversationsModelEvent::ConversationsLoaded);
                     report_error!(e);
                 }
             },
