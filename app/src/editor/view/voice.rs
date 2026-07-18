@@ -481,7 +481,7 @@ impl EditorView {
         ctx.notify();
     }
 
-    fn apply_transcribed_voice_input(
+    pub(crate) fn apply_transcribed_voice_input(
         &mut self,
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
@@ -495,7 +495,9 @@ impl EditorView {
         match result {
             Ok(transcribe_response) => {
                 log::debug!("Transcribed voice input: {transcribe_response:?}");
-                self.user_insert(&transcribe_response, ctx);
+                if !transcribe_response.trim().is_empty() {
+                    self.user_insert(&transcribe_response, ctx);
+                }
             }
             Err(e) => match e {
                 TranscribeError::QuotaLimit => {
@@ -620,3 +622,7 @@ impl EditorView {
         .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "voice_tests.rs"]
+mod tests;
